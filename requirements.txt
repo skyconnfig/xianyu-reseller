@@ -1,0 +1,29 @@
+# 闲鱼转卖助手 2.0 - 依赖清单
+
+# ==================== 核心依赖 ====================
+# 网络请求
+requests>=2.31.0
+urllib3>=2.0.0
+
+# 图像处理
+imageio>=2.31.0
+Pillow>=10.0.0
+
+# ==================== 编译工具 ====================
+# 用于重新打包 EXE
+pyinstaller>=6.0.0
+
+# ==================== 内置模块（不需要安装）====================
+# 以下模块是 Python 3.13 内置的，无需安装：
+# - asyncio (异步编程)
+# - concurrent.futures (线程池)
+# - threading (多线程)
+# - queue (队列)
+# - tkinter (GUI，包含 ttk, messagebox, simpledialog, PhotoImage)
+# - re, os, sys, time, json, glob, hashlib, warnings, webbrowser
+
+# ==================== 开发工具（可选）====================
+# 用于源码分析和反编译
+# dis (内置)
+# marshal (内置)
+# pycdc (需要单独下载：https://github.com/zrax/pycdc/releases)
