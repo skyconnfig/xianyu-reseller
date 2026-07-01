@@ -84,6 +84,7 @@ ccat_ids = []
 urls = []
 user_nicks = []
 areas = []
+pic_urls = []          # 搜索结果中的封面图URL（转卖备选）
 
 # 页码
 page_number = 1
@@ -130,7 +131,7 @@ def get_md5_hash_string(input_str):
 
 def clear_lists():
     """清空列表"""
-    global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas
+    global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, pic_urls
     prices.clear()
     titles.clear()
     want_counts.clear()
@@ -139,6 +140,7 @@ def clear_lists():
     urls.clear()
     user_nicks.clear()
     areas.clear()
+    pic_urls.clear()
     for row in tree.get_children():
         tree.delete(row)
 
@@ -254,7 +256,7 @@ def build_payload(param1, param2):
 
 def fetch_data(keyword):
     """抓取数据（核心函数 - 改进版）"""
-    global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, page_number
+    global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, page_number, pic_urls
     
     # 验证关键词
     if not keyword:
@@ -366,18 +368,42 @@ def fetch_data(keyword):
                 click_param = main_data.get('clickParam', {})
                 args = click_param.get('args', {})
                 
-                # 提取商品信息
-                price = main_data.get('price', {}).get('price', 0)
-                title = main_data.get('title', '')
-                user_nick = main_data.get('userNick', '')
-                area = main_data.get('area', '')
-                fish_tags = main_data.get('fishTags', [])
-                r3_tag_list = main_data.get('r3TagList', [])
-                want_count = main_data.get('wantCount', 0)
+                # 提取 exContent（包含商品详情）
+                ex_content = main_data.get('exContent', {})
+                detail_params = ex_content.get('detailParams', {})
                 
-                # 提取商品ID和分类ID
-                item_id = args.get('itemId', '')
-                ccat_id = args.get('ccatId', '')
+                # 从 detailParams 提取商品信息
+                title = detail_params.get('title', '')
+                user_nick = detail_params.get('userNick', '')
+                price_str = detail_params.get('soldPrice', '0')
+                
+                # 从 args 提取更多信息
+                area = ex_content.get('area', '') or args.get('p_city', '')
+                want_count = int(args.get('wantNum', 0)) if str(args.get('wantNum', '0')).isdigit() else 0
+                item_id = args.get('item_id', '') or args.get('id', '')
+                ccat_id = args.get('cCatId', '')
+                fish_tags = ex_content.get('fishTags', {})
+                r3_tag_list = fish_tags.get('r3', {}).get('tagList', []) if isinstance(fish_tags, dict) else []
+                
+                # 从 fishTags.r3 提取想要人数（如 "488人想要"）
+                if want_count == 0 and r3_tag_list:
+                    for tag in r3_tag_list:
+                        tag_data = tag.get('data', {})
+                        content = tag_data.get('content', '')
+                        # 匹配 "488人想要" 格式
+                        want_match = re.search(r'(\d+)人想要', content)
+                        if want_match:
+                            want_count = int(want_match.group(1))
+                            break
+                
+                # 转换价格为数值
+                try:
+                    price = float(price_str)
+                except (ValueError, TypeError):
+                    price = 0
+                
+                # 提取封面图URL（转卖时备选）
+                pic_url = ex_content.get('picUrl', '')
                 
                 # 构建商品链接
                 item_url = f'https://www.goofish.com/item?id={item_id}' if item_id else 'Error：url'
@@ -393,15 +419,15 @@ def fetch_data(keyword):
                     urls.append(item_url)
                     user_nicks.append(user_nick)
                     areas.append(area)
+                    pic_urls.append(pic_url)
                     
-                    # 添加到表格
+                    # 添加到表格（按可见列顺序）
                     tree.insert('', 'end', values=(
                         price,
                         title,
                         want_count,
                         item_id,
                         ccat_id,
-                        item_url,
                         user_nick,
                         area
                     ))
@@ -518,7 +544,8 @@ def download_file(url, filename=None):
     try:
         response = requests.get(
             url, stream=True, timeout=30, verify=False,
-            cookies=goofish_cookies, headers=goofish_headers
+            cookies=goofish_cookies, headers=goofish_headers,
+            proxies={'http': None, 'https': None}
         )
         response.raise_for_status()
         
@@ -601,7 +628,8 @@ def upload_file(file_path):
                 cookies=agiso_cookies,
                 headers=agiso_upload_headers,
                 files=files,
-                verify=False
+                verify=False,
+                proxies={'http': None, 'https': None}
             )
         
         if response.status_code == 200:
@@ -709,20 +737,29 @@ def process_images_with_progress(img_urls):
 
 def print_selected_row_info():
     """获取选中商品详情，提取图片和描述，启动转卖流程"""
+    global global_describe
+
     selected_item = tree.selection()
     if not selected_item:
         messagebox.showwarning('警告', '请先选择一行数据')
         return
     
     item_values = tree.item(selected_item, 'values')
-    item_id = item_ids[tree.index(selected_item[0])]
+    idx = tree.index(selected_item[0])
+    item_id = item_ids[idx]
     
     print('———— 一键转卖 ————')
     print(f'商品ID: {item_id}')
-    print(f'价格: {item_values[1]}')
-    print(f'URL: {urls[tree.index(selected_item[0])]}')
+    print(f'价格: {prices[idx]}')
+    print(f'URL: {urls[idx]}')
     
-    # 获取商品详情
+    # 获取搜索结果中的 picUrl（作为备选图片源）
+    fallback_img_url = pic_urls[idx] if idx < len(pic_urls) else ''
+    
+    img_urls = []
+    describe_text = titles[idx] if idx < len(titles) else ''
+    
+    # 尝试调用详情API获取完整图片列表和描述
     detail_data = {"itemId": str(item_id)}
     detail_data_str = json.dumps(detail_data)
     
@@ -749,34 +786,65 @@ def print_selected_row_info():
         response = requests.post(
             url, params=params, cookies=goofish_cookies,
             headers=goofish_headers, data={'data': detail_data_str},
-            verify=False, timeout=30
+            verify=False, timeout=30,
+            proxies={'http': None, 'https': None}
         )
         
         if response.status_code == 200:
             detail_json = response.json()
             
-            # 提取图片URL（从详情文本中解析）
-            text = detail_json.get('data', {}).get('item', {}).get('main', {}).get('text', '')
+            # 检查API是否成功
+            ret_code = detail_json.get('ret', [''])[0] if detail_json.get('ret') else ''
             
-            image_compile = re.compile(r'"\\"image\\":\\"(?P<imgUrl>.*?)\\",\\"width\\":\\"', re.S)
-            img_urls = [img.group('imgUrl') for img in image_compile.finditer(text)]
-            
-            # 提取描述
-            describe_compile = re.compile(r'"},\\"mainParams\\":{\\"content\\":\\"(?P<describe>.*?)\\",\\"', re.S)
-            result_describe = describe_compile.search(text)
-            
-            global global_describe
-            if result_describe:
-                global_describe = result_describe.group('describe')
-            
-            print(f'找到 {len(img_urls)} 张图片')
-            print(f'商品描述: {global_describe[:100]}...')
-            
-            if not img_urls:
-                messagebox.showwarning('警告', '未找到商品图片，无法转卖')
-                return
-            
-            # 开始处理图片和发布
+            if 'SUCCESS' in ret_code:
+                # 成功：从详情文本中解析图片
+                text = detail_json.get('data', {}).get('item', {}).get('main', {}).get('text', '')
+                
+                image_compile = re.compile(r'"\\"image\\":\\"(?P<imgUrl>.*?)\\",\\"width\\":\\"', re.S)
+                img_urls = [img.group('imgUrl') for img in image_compile.finditer(text)]
+                
+                # 提取描述
+                describe_compile = re.compile(r'"},\\"mainParams\\":{\\"content\\":\\"(?P<describe>.*?)\\",\\"', re.S)
+                result_describe = describe_compile.search(text)
+                if result_describe:
+                    describe_text = result_describe.group('describe')
+                    
+                    # 清理描述中的特殊字符
+                    describe_text = describe_text.replace('\\n', '\n').replace('\\r', '')
+                
+                print(f'详情API找到 {len(img_urls)} 张图片')
+                print(f'商品描述: {describe_text[:100]}...')
+            else:
+                # API返回失败但不是网络错误（如 FAIL_SYS_USER_VALIDATE）
+                print(f'详情API返回: {ret_code} — 使用备选方案获取图片')
+        
+    except Exception as e:
+        print(f'详情API请求异常: {e}')
+    
+    # 备选方案：如果详情API没拿到图片，使用搜索结果中的picUrl
+    if not img_urls and fallback_img_url:
+        img_urls = [fallback_img_url]
+        print(f'使用搜索结果中的封面图: {fallback_img_url[:80]}...')
+    
+    if not img_urls:
+        # 最终备选：尝试用商品ID构造图片URL
+        # 闲鱼图片URL模式: https://gw.alicdn.com/bao/uploaded/...
+        messagebox.showwarning('提示', 
+            f'未获取到商品图片。\n\n'
+            f'可能原因:\n'
+            f'• Cookie 权限不足（详情API返回验证失败）\n'
+            f'• 商品已下架或删除\n\n'
+            f'建议：\n'
+            f'• 更新闲鱼 Cookie 后重试\n'
+            f'• 或手动打开商品页面确认是否有效')
+        return
+    
+    # 设置全局描述
+    global_describe = describe_text
+    print(f'最终使用 {len(img_urls)} 张图片进行转卖')
+    print(f'商品描述: {global_describe[:100]}...')
+    
+    # 开始处理图片和发布
             process_images_with_progress(img_urls)
         else:
             messagebox.showerror('错误', f'获取商品详情失败：HTTP {response.status_code}')
@@ -814,13 +882,9 @@ def publish():
         messagebox.showerror('错误', '没有已上传的图片，请重新尝试')
         return
     
-    # 提取价格
-    price = str(item_values[1]).replace('¥', '').strip()
-    try:
-        price_float = float(price)
-    except ValueError:
-        messagebox.showerror('错误', f'无效的价格格式: {price}')
-        return
+    # 提取价格和标题（新列顺序: 0=价格, 1=标题, 2=想要人数, ...）
+    price_float = item_values[0] if isinstance(item_values[0], (int, float)) else 0
+    title_text = str(item_values[1]) if len(item_values) > 1 else ''
     
     # 构建地区列表
     division_list = [province_code, city_code]
@@ -838,7 +902,7 @@ def publish():
         'channelCatId': '3cdbae6d47df9251a7f7e02f36b0b49a',
         'pvList': [],
         'virtual': False,
-        'title': str(item_values[0])[:30],
+        'title': title_text[:30],
         'desc': global_describe.replace('\\\\n', '\n').replace('\\n', '\n') if global_describe else '',
         'divisionIdList': division_list,
         'freeShipping': True,
@@ -860,7 +924,8 @@ def publish():
     try:
         response = requests.post(
             url, cookies=agiso_cookies, headers=agiso_publish_headers,
-            data=payload_str, verify=False, timeout=30
+            data=payload_str, verify=False, timeout=30,
+            proxies={'http': None, 'https': None}
         )
         
         print(f'状态码: {response.status_code}')
@@ -916,7 +981,8 @@ def save_good():
         response = requests.post(
             url, params=params, cookies=goofish_cookies,
             headers=goofish_headers, data={'data': save_data_str},
-            verify=False, timeout=30
+            verify=False, timeout=30,
+            proxies={'http': None, 'https': None}
         )
         if response.status_code == 200:
             print(f'[+]收藏商品成功: {response.text[:200]}')
@@ -1153,30 +1219,48 @@ def main():
     
     ttk.Button(input_frame3, text="一键转卖", command=print_selected_row_info).pack(side=tk.LEFT, padx=5)
     
-    # 创建表格（调整行号）
+    # 创建表格（优化列宽和布局）
     tree_frame = ttk.Frame(main_frame)
     tree_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-    
-    # 滚动条
+
+    # 水平滚动条
+    h_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL)
+    h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    # 垂直滚动条
     scrollbar = ttk.Scrollbar(tree_frame)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    
-    # Treeview 表格
+
+    # Treeview 表格 - 优化列宽配置
+    col_config = {
+        '价格':      {'width': 55,  'anchor': 'center'},
+        '标题':      {'width': 380, 'anchor': 'w', 'minwidth': 200},
+        '想要人数':   {'width': 60,  'anchor': 'center'},
+        '商品ID':     {'width': 110, 'anchor': 'center'},
+        '分类ID':     {'width': 90,  'anchor': 'center'},
+        '链接':       {'width': 0,   'minwidth': 0},   # 隐藏链接列节省空间
+        '卖家':       {'width': 85,  'anchor': 'w'},
+        '地区':       {'width': 50,  'anchor': 'center'},
+    }
+
+    visible_columns = [c for c in col_config if col_config[c]['width'] > 0]
     tree = Treeview(
         tree_frame,
-        columns=('价格', '标题', '想要人数', '商品ID', '分类ID', '链接', '卖家', '地区'),
+        columns=tuple(visible_columns),
         show='headings',
         yscrollcommand=scrollbar.set,
-        height=20
+        xscrollcommand=h_scrollbar.set,
+        height=22
     )
-    
-    # 设置列标题
-    for col in tree['columns']:
+
+    for col in visible_columns:
         tree.heading(col, text=col)
-        tree.column(col, width=100 if col != '标题' else 200)
-    
+        cfg = col_config[col]
+        tree.column(col, width=cfg['width'], anchor=cfg.get('anchor', 'w'), minwidth=cfg.get('minwidth', cfg['width']))
+
     tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.config(command=tree.yview)
+    h_scrollbar.config(command=tree.xview)
     
     # 配置网格权重
     root.columnconfigure(0, weight=1)
