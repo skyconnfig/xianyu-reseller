@@ -15,6 +15,7 @@ import warnings
 import webbrowser
 import threading
 import queue
+import traceback
 from datetime import datetime
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -66,7 +67,7 @@ agiso_publish_headers = {
     'sec-ch-ua': '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
     'sec-ch-ua-mobile': '?0',
     'X-Requested-With': 'XMLHttpRequest',
-    'Content-Type': 'application/json-patch+json',
+    'Content-Type': 'application/json',
     'Origin': 'https://aldsidle.agiso.com',
     'Sec-Fetch-Site': 'same-origin',
     'Sec-Fetch-Mode': 'cors',
@@ -675,19 +676,33 @@ def upload_file(file_path):
                 proxies={'http': None, 'https': None}
             )
         
-        print(f'  [上传] 状态码: {response.status_code}, 响应: {response.text[:200]}')
+        print(f'  [上传] 状态码: {response.status_code}, 响应: {response.text[:500]}')
         
         if response.status_code == 200:
             response_data = response.json()
+            # 始终保存完整响应到日志文件
+            try:
+                log_dir = os.path.dirname(os.path.abspath(__file__))
+                with open(os.path.join(log_dir, 'upload_response.log'), 'a', encoding='utf-8') as uf:
+                    uf.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {file_name}\n')
+                    uf.write(json.dumps(response_data, ensure_ascii=False) + '\n\n')
+            except:
+                pass
+            print(f'  [上传] 完整JSON: {json.dumps(response_data, ensure_ascii=False)[:500]}')
             if response_data.get('succeeded') or response_data.get('isSuccess'):
-                data = response_data.get('data', {})
+                # Agiso 新版 API: data 嵌套了一层 data.data
+                raw_data = response_data.get('data', {})
+                data = raw_data.get('data', raw_data)  # 兼容新旧两种结构
                 image_id = data.get('imageId', '')
                 oss_key = data.get('ossKey', '')
                 agiso_url = data.get('agisoImgUrl', '')
+                if not image_id:
+                    print(f'  [上传] ⚠️ 响应中无 imageId！raw_data keys: {list(raw_data.keys()) if raw_data else "[]"}, nested keys: {list(data.keys()) if data else "[]"}')
+                    return False  # 无有效 imageId，视为失败
                 global_image_ids.append(image_id)
                 global_oss_keys.append(oss_key)
                 global_agiso_img_urls.append(agiso_url)
-                print(f'  [上传] 成功! imageId={image_id}')
+                print(f'  [上传] 成功! imageId={image_id}, ossKey={oss_key[:20] if oss_key else ""}...')
                 return True
             else:
                 print(f'  [上传] API 返回失败: {response_data.get("message", "unknown")}')
@@ -697,31 +712,6 @@ def upload_file(file_path):
             return False
     except Exception as e:
         print(f'  [上传] 异常: {e}')
-        return False
-    
-    try:
-        with open(file_path, 'rb') as f:
-            files = {'files': (file_name, f, 'image/png')}
-            response = requests.post(
-                url,
-                cookies=agiso_cookies,
-                headers=agiso_upload_headers,
-                files=files,
-                verify=False,
-                proxies={'http': None, 'https': None}
-            )
-        
-        if response.status_code == 200:
-            response_data = response.json()
-            if response_data.get('succeeded') or response_data.get('isSuccess'):
-                data = response_data.get('data', {})
-                global_image_ids.append(data.get('imageId', ''))
-                global_oss_keys.append(data.get('ossKey', ''))
-                global_agiso_img_urls.append(data.get('agisoImgUrl', ''))
-                return True
-        return False
-    except requests.exceptions.RequestException as e:
-        print(f'上传请求错误: {e}')
         return False
 
 class ProgressDialog:
@@ -937,30 +927,94 @@ def _do_publish(item_values, silent=False):
     """
     global province_code, city_code, district_code
 
-    print('\n==== 调试信息 ====')
+    # 确定日志目录（使用脚本所在目录）
+    log_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 立即写入入口标记（确认函数被调用）
+    try:
+        with open(os.path.join(log_dir, 'publish_entry.log'), 'a', encoding='utf-8') as pf:
+            pf.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] _do_publish called, silent={silent}, images={len(global_image_ids)}, desc_len={len(global_describe)}\n')
+    except:
+        pass
+
+    # 全函数 try/except —— 任何异常都写文件
+    try:
+        return _do_publish_impl(item_values, silent, log_dir)
+    except Exception as fatal_err:
+        err_file = os.path.join(log_dir, 'publish_fatal.log')
+        with open(err_file, 'a', encoding='utf-8') as ef:
+            ef.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] FATAL 异常: {fatal_err}\n')
+            ef.write(traceback.format_exc() + '\n\n')
+        print(f'[Agiso Publish] FATAL: {fatal_err}')
+        traceback.print_exc()
+        if not silent:
+            messagebox.showerror('发布失败', f'发布失败（致命错误）:\n{fatal_err}\n\n详情已写入 publish_fatal.log')
+        return False
+
+
+def _do_publish_impl(item_values, silent, log_dir):
+    """_do_publish 的实际实现体"""
     print(f'图片ID列表: {global_image_ids}')
     print(f'OSS Keys: {global_oss_keys}')
     print(f'图片URL列表: {global_agiso_img_urls}')
     print(f'商品描述: {global_describe[:100]}...')
     print(f'地区代码: {province_code}, {city_code}, {district_code}')
 
-    # 构建图片列表
-    img_list = [
-        {'imageId': iid, 'agisoImgUrl': iurl, 'ossKey': okey}
-        for iid, iurl, okey in zip(global_image_ids, global_agiso_img_urls, global_oss_keys)
-    ]
+    # 保存状态到日志
+    try:
+        with open(os.path.join(log_dir, 'publish_state.log'), 'a', encoding='utf-8') as sf:
+            sf.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] global_image_ids={global_image_ids}\n')
+            sf.write(f'  global_agiso_img_urls={global_agiso_img_urls}\n')
+            sf.write(f'  global_oss_keys={global_oss_keys}\n\n')
+    except:
+        pass
 
-    if not img_list:
+    # 构建图片列表
+    # Agiso API 字段名: 'imgList'（原版反汇编字段名，实测 API 只接受这个）
+    # 值为对象列表: [{'imageId': 'xxx', 'agisoImgUrl': 'yyy', 'ossKey': 'zzz'}, ...]
+    # 最大数量限制约 9 张
+    max_images = 9
+    
+    # 过滤空值 imageId（上传失败时可能产生）
+    valid_ids = [iid for iid in global_image_ids if iid]
+    valid_urls = [u for i, u in enumerate(global_agiso_img_urls) if i < len(valid_ids)]
+    valid_oss = [o for i, o in enumerate(global_oss_keys) if i < len(valid_ids)]
+
+    if len(valid_ids) > max_images:
+        print(f'  [发布] 图片数量 {len(valid_ids)} 超过限制 {max_images}，截取前 {max_images} 张')
+    
+    if not valid_ids or not valid_ids[0]:
         if not silent:
-            messagebox.showerror('错误', '没有已上传的图片，请重新尝试')
+            messagebox.showerror('错误', '没有有效的已上传图片！请先获取商品图片。')
         return False
 
+    # 构建图片列表对象
+    # ⚠️ 关键: 字段名必须是 'imgList'（不是 'imagesList'）
+    #   实测 Agiso API 只接受 'imgList'，用 'imagesList' 会报 "图片列表数据有误"
+    #   imageId 保持 string 类型（避免大整数精度丢失）
+    #   agisoImgUrl 保持上传 API 返回的原始值（含 ?x-oss-process=... 参数）
+    
+    images_list_data = [
+        {
+            'imageId': str(valid_ids[i]),
+            'agisoImgUrl': str(valid_urls[i]) if i < len(valid_urls) else '',
+            'ossKey': str(valid_oss[i]) if i < len(valid_oss) else ''
+        }
+        for i in range(min(len(valid_ids), max_images))
+    ]
+
+    print(f'  [发布] imgList 数据 ({len(images_list_data)} 项):')
+    for idx, item in enumerate(images_list_data):
+        print(f'    [{idx}] imageId={item["imageId"]} (type={type(item["imageId"]).__name__}), url_len={len(item["agisoImgUrl"])}')
+
     # 提取价格和标题（列顺序: 0=价格, 1=标题, ...）
-    price_float = item_values[0] if isinstance(item_values[0], (int, float)) else 0
+    # 原版 price 从 item_values[1].replace('¥', '').strip() 取，是字符串类型
+    # 原版用 float(price) 仅校验，API 仍发送原始字符串
+    price_str = str(item_values[0]) if len(item_values) > 0 else '0'
     try:
-        price_float = float(price_float)
+        float(price_str)  # 仅校验格式有效
     except (ValueError, TypeError):
-        price_float = 0.0
+        price_str = '0'
     title_text = str(item_values[1]) if len(item_values) > 1 else ''
 
     # 构建地区列表
@@ -980,23 +1034,41 @@ def _do_publish(item_values, silent=False):
         'pvList': [],
         'virtual': False,
         'title': title_text[:30],
-        'desc': global_describe.replace('\\\\n', '\n').replace('\\n', '\n') if global_describe else '',
+        'desc': global_describe.replace('\\\\n', '\n') if global_describe else '',
         'divisionIdList': division_list,
         'freeShipping': True,
-        'reservePrice': price_float,
-        'originalPrice': price_float,
+        'reservePrice': price_str,
+        'originalPrice': 0,
         'quantity': 9999,
-        'stuffStatus': '未使用',
+        'stuffStatus': 0,
         'transportFee': 0,
         'itemSkuList': [],
         'categoryName': '其他/电子资料/电子资料/电子资料',
-        'imgList': img_list
+        'imgList': images_list_data
     }
 
     payload_str = json.dumps(payload, ensure_ascii=False)
-    print(f'\n请求体: {payload_str[:500]}...')
+    print(f'\n请求体: {payload_str[:1000]}...')
+
+    # 保存请求到绝对路径，确保能找到
+    req_dump_path = os.path.join(log_dir, 'publish_request_dump.json')
+    resp_dump_path = os.path.join(log_dir, 'publish_response_dump.json')
+    err_log_path = os.path.join(log_dir, 'publish_error.log')
+
+    try:
+        with open(req_dump_path, 'w', encoding='utf-8') as df:
+            json.dump({
+                'url': 'https://aldsidle.agiso.com/api/GoodsManage/Publish',
+                'content_type': agiso_publish_headers.get('Content-Type', 'unknown'),
+                'payload': {k: (v if k != 'imgList' else json.loads(json.dumps(images_list_data, ensure_ascii=False))) for k, v in payload.items()},
+                'imgList_full': json.loads(json.dumps(images_list_data, ensure_ascii=False)),
+            }, df, ensure_ascii=False, indent=2)
+        print(f'[Agiso Publish] 请求已保存到: {req_dump_path}')
+    except Exception as dump_err:
+        print(f'[Agiso Publish] ⚠️ 保存请求失败: {dump_err}')
 
     url = 'https://aldsidle.agiso.com/api/GoodsManage/Publish'
+    print(f'[Agiso Publish] → 发送到 {url}')
 
     try:
         response = requests.post(
@@ -1007,10 +1079,25 @@ def _do_publish(item_values, silent=False):
 
         print(f'状态码: {response.status_code}')
 
+        # 保存完整响应用于调试
+        try:
+            with open(resp_dump_path, 'w', encoding='utf-8') as rf:
+                rf.write(response.text[:5000])
+            print(f'[Agiso Publish] 响应已保存到: {resp_dump_path}')
+        except Exception as dump_err:
+            print(f'[Agiso Publish] ⚠️ 保存响应失败: {dump_err}')
+
         if response.status_code == 200:
             response_data = response.json()
-            if response_data.get('succeeded') or response_data.get('isSuccess'):
-                print(f'发布成功: {json.dumps(response_data, ensure_ascii=False)[:500]}')
+            print(f'\n[Agiso Publish] 完整响应: {json.dumps(response_data, ensure_ascii=False)}')
+            # Agiso 响应结构: {"succeeded": true, "data": {"isSuccess": true/false, ...}}
+            # 注意: 顶层 "succeeded" 仅表示 HTTP 请求成功，不代表发布成功
+            # 真正决定发布成败的是 data.isSuccess
+            data_field = response_data.get('data', {})
+            publish_success = data_field.get('isSuccess', False) or response_data.get('isSuccess')
+            
+            if publish_success:
+                print(f'[Agiso Publish] ✅ 发布成功')
                 if not silent:
                     messagebox.showinfo('成功', '商品已成功发布上架！')
                 # ① 收藏原商品到闲鱼收藏夹（原版 complete_process 调用链）
@@ -1019,20 +1106,45 @@ def _do_publish(item_values, silent=False):
                 delete_png_files_recursively()
                 return True
             else:
-                error_msg = response_data.get('message', '未知错误')
-                print(f'发布失败: {error_msg}, 完整响应: {response.text[:1000]}')
+                error_msg = data_field.get('errorMsg', '') or response_data.get('message', response_data.get('msg', '未知错误'))
+                print(f'[Agiso Publish] ❌ 失败: {error_msg}')
+                print(f'[Agiso Publish] 完整响应: {response.text[:2000]}')
+                # 写入日志文件
+                try:
+                    with open(err_log_path, 'a', encoding='utf-8') as lf:
+                        lf.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Publish失败: {error_msg}\n')
+                        lf.write(f'  完整响应: {response.text[:2000]}\n\n')
+                    print(f'[Agiso Publish] 错误已保存到: {err_log_path}')
+                except Exception as log_err:
+                    print(f'[Agiso Publish] ⚠️ 写入错误日志失败: {log_err}')
                 if not silent:
-                    messagebox.showerror('发布失败', f'发布失败: {error_msg}')
+                    messagebox.showerror('发布失败', f'发布失败: {error_msg}\n\n详情已写入 publish_error.log')
                 return False
         else:
-            print(f'HTTP错误: {response.text[:500]}')
+            error_detail = response.text[:500]
+            print(f'HTTP错误: {error_detail}')
+            try:
+                with open(err_log_path, 'a', encoding='utf-8') as lf:
+                    lf.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] HTTP错误({response.status_code}): {error_detail}\n\n')
+                print(f'[Agiso Publish] HTTP错误已保存到: {err_log_path}')
+            except Exception as log_err:
+                print(f'[Agiso Publish] ⚠️ 写入错误日志失败: {log_err}')
             if not silent:
-                messagebox.showerror('发布失败', f'发布失败：HTTP {response.status_code}')
+                messagebox.showerror('发布失败', f'发布失败：HTTP {response.status_code}\n\n详情已写入 publish_error.log')
             return False
     except Exception as e:
         print(f'发布异常: {str(e)}')
+        import traceback
+        traceback.print_exc()
+        try:
+            with open(err_log_path, 'a', encoding='utf-8') as lf:
+                lf.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] 发布异常: {str(e)}\n')
+                lf.write(traceback.format_exc() + '\n\n')
+            print(f'[Agiso Publish] 异常已保存到: {err_log_path}')
+        except Exception as log_err:
+            print(f'[Agiso Publish] ⚠️ 写入异常日志失败: {log_err}')
         if not silent:
-            messagebox.showerror('发布失败', f'发布失败：{str(e)}')
+            messagebox.showerror('发布失败', f'发布失败：{str(e)}\n\n详情已写入 publish_error.log')
         return False
 
 
@@ -1355,7 +1467,21 @@ def batch_resell_selected():
             old_selection = tree.selection()
             tree.selection_set(selected_items[i])
 
-            ok = _do_publish(item_values, silent=True)
+            ok = False
+            try:
+                ok = _do_publish(item_values, silent=True)
+            except Exception as pub_err:
+                print(f'[批量] 发布异常: {pub_err}')
+                import traceback
+                traceback.print_exc()
+                try:
+                    dump_dir = os.path.dirname(os.path.abspath(__file__))
+                    with open(os.path.join(dump_dir, 'publish_error.log'), 'a', encoding='utf-8') as lf:
+                        lf.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] 批量发布异常: {pub_err}\n')
+                        lf.write(traceback.format_exc() + '\n\n')
+                except Exception as log_err:
+                    print(f'[批量] ⚠️ 写入错误日志失败: {log_err}')
+                ok = False
 
             # 恢复选中状态
             tree.selection_set(old_selection)

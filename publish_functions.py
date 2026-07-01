@@ -515,11 +515,19 @@ def publish():
     print(f'选中的商品值: {item_values}')
     print(f'地区代码: {province_code}, {city_code}, {district_code}')
     
-    # 构建图片列表
-    img_list = [
-        {'imageId': image_id, 'agisoImgUrl': agiso_img_url, 'ossKey': oss_key}
-        for image_id, agiso_img_url, oss_key in zip(global_image_ids, global_agiso_img_urls, global_oss_keys)
+    # 构建图片列表（API 字段名: 'imgList'，对象格式, 最多 9 张）
+    max_images = 9
+    valid_ids = [iid for iid in global_image_ids if iid][:max_images]
+    valid_urls = [u for i, u in enumerate(global_agiso_img_urls) if i < len(valid_ids) and global_image_ids[i]]
+    valid_oss = [o for i, o in enumerate(global_oss_keys) if i < len(valid_ids) and global_image_ids[i]]
+    if not valid_ids:
+        messagebox.showerror('错误', '没有有效的已上传图片！请先获取商品图片。')
+        return
+    images_list_data = [
+        {'imageId': str(valid_ids[i]), 'agisoImgUrl': str(valid_urls[i]) if i < len(valid_urls) else '', 'ossKey': str(valid_oss[i]) if i < len(valid_oss) else ''}
+        for i in range(len(valid_ids))
     ]
+    print(f'  [publish] imgList ({len(images_list_data)} 项)')
     
     # 提取价格
     price = item_values[1].replace('¥', '').strip()
@@ -548,14 +556,14 @@ def publish():
         'desc': global_describe.replace('\\n', '\n') if global_describe else '',
         'divisionIdList': division_list,
         'freeShipping': True,
-        'reservePrice': float(price),
-        'originalPrice': float(price),
+        'reservePrice': price,
+        'originalPrice': 0,
         'quantity': 9999,
-        'stuffStatus': '未使用',
+        'stuffStatus': 0,
         'transportFee': 0,
         'itemSkuList': [],
         'categoryName': '其他/电子资料/电子资料/电子资料',
-        'imgList': img_list
+        'imgList': images_list_data
     }
     
     payload_str = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -589,7 +597,10 @@ def publish():
             try:
                 response_data = response.json()
                 
-                if response_data.get('succeeded'):
+                # Agiso 响应结构: {"succeeded": true, "data": {"isSuccess": true/false, ...}}
+                # 注意: 顶层 "succeeded" 仅表示 HTTP 请求成功，不代表发布成功
+                data_field_pf = response_data.get('data', {})
+                if data_field_pf.get('isSuccess') or response_data.get('isSuccess'):
                     print(f'\n==== 发布成功 ====')
                     print(f'响应数据: {json.dumps(response_data, ensure_ascii=False, indent=2)[:500]}')
                     messagebox.showinfo('成功', '商品发布成功！')
@@ -600,7 +611,7 @@ def publish():
                     # 清理临时PNG文件
                     delete_png_files_recursively()
                 else:
-                    error_msg = response_data.get('message', '未知错误')
+                    error_msg = data_field_pf.get('errorMsg', '') or response_data.get('message', '未知错误')
                     print(f'\n==== 发布失败 ====')
                     print(f'错误信息: {error_msg}')
                     print(f'完整响应: {response.text[:2000]}')
