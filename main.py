@@ -89,6 +89,10 @@ pic_urls = []          # 搜索结果中的封面图URL（转卖备选）
 # 页码
 page_number = 1
 
+# 标签持久引用（替代递归遍历查找）
+_page_label = None
+_stats_label = None
+
 # GUI 控件
 tree = None
 entry_keyword = None
@@ -143,6 +147,11 @@ def clear_lists():
     pic_urls.clear()
     for row in tree.get_children():
         tree.delete(row)
+    # 重置统计（使用持久化引用）
+    if _page_label:
+        _page_label.config(text="第 1 页")
+    if _stats_label:
+        _stats_label.config(text="共 0 条商品 | 已选 0 条")
 
 # ==================== Cookie 验证函数 ====================
 
@@ -374,6 +383,11 @@ def fetch_data(keyword):
                 
                 # 从 detailParams 提取商品信息
                 title = detail_params.get('title', '')
+                # 清洗标题：去掉换行符/制表符，避免 Treeview 行被撑高
+                title = ' '.join(title.splitlines()).strip()
+                # 超长截断到 80 字符，防止标题列过宽影响显示
+                if len(title) > 80:
+                    title = title[:78] + '…'
                 user_nick = detail_params.get('userNick', '')
                 price_str = detail_params.get('soldPrice', '0')
                 
@@ -440,6 +454,9 @@ def fetch_data(keyword):
         
         messagebox.showinfo('成功', f'成功抓取 {new_count} 个新商品（总计 {len(item_ids)} 个）')
         
+        # 更新页码和统计显示
+        _update_page_stats()
+        
     except requests.exceptions.Timeout:
         messagebox.showerror('错误', '请求超时，请检查网络连接')
     except requests.exceptions.RequestException as e:
@@ -489,10 +506,13 @@ def download_images(image_urls):
     
     return results
 
-def fetch_next_page_data():
-    """抓取下一页数据"""
+def goto_page(page_no):
+    """跳转到指定页（清空旧数据后重新加载）"""
     global page_number
-    page_number += 1
+    if page_no < 1:
+        return
+    page_number = page_no
+    clear_lists()
     fetch_data(entry_keyword.get().strip())
 
 def open_url():
@@ -924,44 +944,48 @@ def print_selected_row_info():
     # 开始处理图片和发布
     process_images_with_progress(img_urls)
 
-def publish():
-    """发布商品到Agiso"""
-    global global_image_ids, global_oss_keys, global_agiso_img_urls, global_describe
+def _do_publish(item_values, silent=False):
+    """
+    核心发布逻辑（原版 complete_process 调用链）：
+      publish()   → 发布到阿奇索 → 闲鱼上架
+      save_good() → 收藏原商品到闲鱼收藏夹
+      delete_png()→ 清理临时文件
+    
+    silent=True 时不弹 messagebox，供批量模式调用；返回 True/False 表示成功与否。
+    """
     global province_code, city_code, district_code
-    
-    selected_item = tree.selection()
-    if not selected_item:
-        messagebox.showwarning('警告', '请先选择一行数据')
-        return
-    
-    item_values = tree.item(selected_item, 'values')
-    
+
     print('\n==== 调试信息 ====')
     print(f'图片ID列表: {global_image_ids}')
     print(f'OSS Keys: {global_oss_keys}')
     print(f'图片URL列表: {global_agiso_img_urls}')
     print(f'商品描述: {global_describe[:100]}...')
     print(f'地区代码: {province_code}, {city_code}, {district_code}')
-    
+
     # 构建图片列表
     img_list = [
         {'imageId': iid, 'agisoImgUrl': iurl, 'ossKey': okey}
         for iid, iurl, okey in zip(global_image_ids, global_agiso_img_urls, global_oss_keys)
     ]
-    
+
     if not img_list:
-        messagebox.showerror('错误', '没有已上传的图片，请重新尝试')
-        return
-    
-    # 提取价格和标题（新列顺序: 0=价格, 1=标题, 2=想要人数, ...）
+        if not silent:
+            messagebox.showerror('错误', '没有已上传的图片，请重新尝试')
+        return False
+
+    # 提取价格和标题（列顺序: 0=价格, 1=标题, ...）
     price_float = item_values[0] if isinstance(item_values[0], (int, float)) else 0
+    try:
+        price_float = float(price_float)
+    except (ValueError, TypeError):
+        price_float = 0.0
     title_text = str(item_values[1]) if len(item_values) > 1 else ''
-    
+
     # 构建地区列表
     division_list = [province_code, city_code]
     if district_code:
         division_list.append(district_code)
-    
+
     # 构建发布参数
     payload = {
         'itemBizType': 2,
@@ -986,40 +1010,59 @@ def publish():
         'categoryName': '其他/电子资料/电子资料/电子资料',
         'imgList': img_list
     }
-    
+
     payload_str = json.dumps(payload, ensure_ascii=False)
     print(f'\n请求体: {payload_str[:500]}...')
-    
+
     url = 'https://aldsidle.agiso.com/api/GoodsManage/Publish'
-    
+
     try:
         response = requests.post(
             url, cookies=agiso_cookies, headers=agiso_publish_headers,
             data=payload_str, verify=False, timeout=30,
             proxies={'http': None, 'https': None}
         )
-        
+
         print(f'状态码: {response.status_code}')
-        
+
         if response.status_code == 200:
             response_data = response.json()
             if response_data.get('succeeded') or response_data.get('isSuccess'):
                 print(f'发布成功: {json.dumps(response_data, ensure_ascii=False)[:500]}')
-                messagebox.showinfo('成功', '商品发布成功！')
-                # 收藏原商品
+                if not silent:
+                    messagebox.showinfo('成功', '商品已成功发布上架！')
+                # ① 收藏原商品到闲鱼收藏夹（原版 complete_process 调用链）
                 save_good()
-                # 清理临时文件
+                # ② 清理临时文件
                 delete_png_files_recursively()
+                return True
             else:
                 error_msg = response_data.get('message', '未知错误')
                 print(f'发布失败: {error_msg}, 完整响应: {response.text[:1000]}')
-                messagebox.showerror('发布失败', f'发布失败: {error_msg}')
+                if not silent:
+                    messagebox.showerror('发布失败', f'发布失败: {error_msg}')
+                return False
         else:
             print(f'HTTP错误: {response.text[:500]}')
-            messagebox.showerror('发布失败', f'发布失败：HTTP {response.status_code}')
+            if not silent:
+                messagebox.showerror('发布失败', f'发布失败：HTTP {response.status_code}')
+            return False
     except Exception as e:
         print(f'发布异常: {str(e)}')
-        messagebox.showerror('发布失败', f'发布失败：{str(e)}')
+        if not silent:
+            messagebox.showerror('发布失败', f'发布失败：{str(e)}')
+        return False
+
+
+def publish():
+    """单件发布入口（带弹框提示）"""
+    selected_item = tree.selection()
+    if not selected_item:
+        messagebox.showwarning('警告', '请先选择一行数据')
+        return
+
+    item_values = tree.item(selected_item, 'values')
+    _do_publish(item_values, silent=False)
 
 def save_good():
     """收藏商品"""
@@ -1161,7 +1204,7 @@ def export_to_csv():
         with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
             # 写入表头
-            writer.writerow(['价格', '标题', '想要人数', '商品ID', '分类ID', '链接', '卖家', '地区'])
+            writer.writerow(['价格', '标题', '想要人数', '商品ID', '分类ID', '卖家', '地区'])
             
             # 写入数据
             for i in range(len(item_ids)):
@@ -1171,7 +1214,6 @@ def export_to_csv():
                     want_counts[i] if i < len(want_counts) else '',
                     item_ids[i] if i < len(item_ids) else '',
                     ccat_ids[i] if i < len(ccat_ids) else '',
-                    urls[i] if i < len(urls) else '',
                     user_nicks[i] if i < len(user_nicks) else '',
                     areas[i] if i < len(areas) else ''
                 ])
@@ -1201,7 +1243,7 @@ def export_to_excel():
         ws.title = "闲鱼商品数据"
         
         # 写入表头
-        headers = ['价格', '标题', '想要人数', '商品ID', '分类ID', '链接', '卖家', '地区']
+        headers = ['价格', '标题', '想要人数', '商品ID', '分类ID', '卖家', '地区']
         ws.append(headers)
         
         # 设置表头样式
@@ -1219,20 +1261,18 @@ def export_to_excel():
                 want_counts[i] if i < len(want_counts) else '',
                 item_ids[i] if i < len(item_ids) else '',
                 ccat_ids[i] if i < len(ccat_ids) else '',
-                urls[i] if i < len(urls) else '',
                 user_nicks[i] if i < len(user_nicks) else '',
                 areas[i] if i < len(areas) else ''
             ])
         
         # 调整列宽
         ws.column_dimensions['A'].width = 10
-        ws.column_dimensions['B'].width = 30
+        ws.column_dimensions['B'].width = 50
         ws.column_dimensions['C'].width = 12
         ws.column_dimensions['D'].width = 15
         ws.column_dimensions['E'].width = 15
-        ws.column_dimensions['F'].width = 40
-        ws.column_dimensions['G'].width = 15
-        ws.column_dimensions['H'].width = 12
+        ws.column_dimensions['F'].width = 12
+        ws.column_dimensions['G'].width = 10
         
         # 保存文件
         wb.save(filename)
@@ -1240,107 +1280,425 @@ def export_to_excel():
     except Exception as e:
         messagebox.showerror('错误', f'导出Excel失败：{e}')
 
+# ==================== 辅助函数 ====================
+
+def _update_page_stats():
+    """更新页码和统计标签显示"""
+    if _page_label:
+        _page_label.config(text=f"第 {page_number} 页")
+    if _stats_label:
+        _stats_label.config(text=f"共 {len(item_ids)} 条商品 | 已选 0 条")
+
+def batch_resell_selected():
+    """多商品一键转卖 - 批量处理所有选中的商品"""
+    selected_items = tree.selection()
+    
+    if not selected_items:
+        messagebox.showwarning('提示', '请先选择要转卖的商品（可多选）')
+        return
+    
+    # 确认操作
+    count = len(selected_items)
+    result = messagebox.askyesno(
+        '确认批量转卖',
+        f'即将对 {count} 个选中商品执行一键转卖：\n\n'
+        f'每个商品会依次执行：\n'
+        f'  ① 获取详情/封面图\n  ② 上传图片到阿奇索\n  ③ 直接发布上架\n\n'
+        f'是否继续？'
+    )
+    if not result:
+        return
+
+    # 获取选中的行索引
+    indices = [tree.index(sid) for sid in selected_items]
+    
+    # 创建进度对话框
+    total_steps = count * 4  # 每个商品约4步
+    pdlg = ProgressDialog(tree.winfo_toplevel(), '批量转卖', f'准备处理 {count} 个商品...', total_steps)
+
+    def process_all():
+        success_count = 0
+        fail_count = 0
+        
+        for i, idx in enumerate(indices):
+            item_id = item_ids[idx] if idx < len(item_ids) else ''
+            
+            # === 步骤1: 获取图片和描述 ===
+            title_short = titles[idx][:15] if idx < len(titles) else "未知"
+            pdlg.update_progress(i * 4 + 1, "[{} / {}] 获取 [{}] 的图片...".format(i+1, count, title_short))
+            
+            # 使用与单件相同的逻辑获取图片
+            img_urls, describe_text = _get_item_images_and_desc(idx)
+            
+            if not img_urls:
+                print(f'[批量] 商品 {item_id} 无可用图片，跳过')
+                fail_count += 1
+                continue
+            
+            # === 步骤2: 处理图片并上传 ===
+            pdlg.update_progress(i * 4 + 2, f"[{i+1}/{count}] 上传图片...")
+            
+            # 清空之前的上传结果（保留全局描述）
+            global global_image_ids, global_oss_keys, global_agiso_img_urls
+            global_image_ids.clear()
+            global_oss_keys.clear()
+            global_agiso_img_urls.clear()
+            
+            # 下载→转换→上传
+            uploaded_ok = False
+            for img_url in img_urls:
+                filepath = download_file(img_url)
+                if filepath:
+                    convert_images_to_png_in_directory()
+                    _, png_paths = find_png_files_without_extension()
+                    for pp in png_paths:
+                        ok = upload_file(pp)
+                        if ok and not uploaded_ok:
+                            uploaded_ok = True
+                    delete_png_files_recursively()
+            
+            if not global_image_ids:
+                print(f'[批量] 商品 {item_id} 图片上传失败，跳过发布')
+                fail_count += 1
+                continue
+            
+            # === 步骤3: 发布商品（完整调用链：发布→收藏→清理）===
+            pdlg.update_progress(i * 4 + 3, f"[{i+1}/{count}] 发布到阿奇索...")
+
+            # 设置当前商品的描述
+            global global_describe
+            global_describe = describe_text
+
+            # 直接传入 item_values，静默发布（不弹框）
+            item_values = tree.item(selected_items[i], 'values')
+            # 确保 tree 选中当前项（save_good() 内部依赖 tree.selection()）
+            old_selection = tree.selection()
+            tree.selection_set(selected_items[i])
+
+            ok = _do_publish(item_values, silent=True)
+
+            # 恢复选中状态
+            tree.selection_set(old_selection)
+
+            if ok:
+                success_count += 1
+                pdlg.update_progress((i + 1) * 4, f"[{i+1}/{count}] 「{titles[idx][:10] if idx < len(titles) else ''}」✅ 发布成功")
+            else:
+                fail_count += 1
+                pdlg.update_progress((i + 1) * 4, f"[{i+1}/{count}] 「{titles[idx][:10] if idx < len(titles) else ''}」❌ 发布失败")
+
+        pdlg.destroy()
+        
+        # 最终报告
+        msg = f'批量转卖完成！\n\n成功: {success_count} 个\n失败: {fail_count} 个\n总计: {count} 个'
+        if fail_count == 0:
+            messagebox.showinfo('批量转卖成功', msg)
+        else:
+            messagebox.showwarning('批量转卖部分成功', msg)
+    
+    threading.Thread(target=process_all, daemon=True).start()
+
+def _get_item_images_and_desc(idx):
+    """
+    获取指定索引的商品的图片URL列表和描述文本。
+    返回 (img_urls: list[str], describe_text: str)
+    与 print_selected_row_info 的图片获取逻辑相同，但只返回数据不触发流程。
+    """
+    global global_describe
+    
+    item_id = item_ids[idx] if idx < len(item_ids) else ''
+    fallback_img_url = pic_urls[idx] if idx < len(pic_urls) else ''
+    
+    img_urls = []
+    describe_text = titles[idx] if idx < len(titles) else ''
+    
+    if not item_id:
+        return ([], describe_text)
+    
+    # 尝试详情 API
+    token = goofish_cookies.get('_m_h5_tk', '').split('_')[0]
+    if token:
+        try:
+            detail_data = {"itemId": str(item_id)}
+            detail_data_str = json.dumps(detail_data)
+            timestamp = get_current_timestamp_milliseconds()
+            sign = get_md5_hash_string(f'{token}&{timestamp}&34839810&{detail_data_str}')
+            params = {
+                'jsv': '2.7.2', 'appKey': '34839810', 't': timestamp, 'sign': sign,
+                'v': '1.0', 'type': 'originaljson', 'accountSite': 'xianyu',
+                'dataType': 'json', 'timeout': '20000',
+                'api': 'mtop.taobao.idle.pc.detail',
+                'sessionOption': 'AutoLoginOnly', 'spm_cnt': 'a21ybx.item.0.0'
+            }
+            resp = requests.post(
+                'https://h5api.m.goofish.com/h5/mtop.taobao.idle.pc.detail/1.0/',
+                params=params, cookies=goofish_cookies, headers=goofish_headers,
+                data={'data': detail_data_str}, verify=False, timeout=30,
+                proxies={'http': None, 'https': None}
+            )
+            if resp.status_code == 200:
+                dj = resp.json()
+                rc = dj.get('ret', [''])[0] if dj.get('ret') else ''
+                if 'SUCCESS' in rc:
+                    txt = dj.get('data', {}).get('item', {}).get('main', {}).get('text', '')
+                    ic = re.compile(r'"\\"image\\":\\"(?P<u>.*?)\\",\\"width\\":\\"', re.S)
+                    img_urls = [m.group('u') for m in ic.finditer(txt)]
+                    dc = re.compile(r'"},\\"mainParams\\":{\\"content\\":\\"(?P<d>.*?)\\",\\"', re.S)
+                    dm = dc.search(txt)
+                    if dm:
+                        describe_text = dm.group('d').replace('\\n', '\n').replace('\\r', '')
+        except Exception as e:
+            print(f'[详情API] 异常: {e}')
+    
+    # 备选方案
+    if not img_urls and fallback_img_url:
+        img_urls = [fallback_img_url]
+    
+    return (img_urls, describe_text)
+
+
 # ==================== 主程序 ====================
+
+# 排序状态
+sort_column = None
+sort_reverse = False
+
+def on_tree_heading_click(event):
+    """点击表头排序"""
+    global sort_column, sort_reverse, prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, pic_urls
+
+    # 获取点击的列标识符
+    col_id = tree.identify_column(event.x)
+    if not col_id:
+        return
+    
+    # 从列ID中提取列名 (格式: #0, #1, ...)
+    try:
+        col_idx = int(col_id.lstrip('#'))
+        if col_idx >= len(visible_columns):
+            return
+        column = visible_columns[col_idx]
+    except ValueError:
+        return
+    
+    # 切换排序方向
+    if sort_column == column:
+        sort_reverse = not sort_reverse
+    else:
+        sort_column = column
+        sort_reverse = False
+    
+    # 获取数据索引（映射可见列名到数据列表索引）
+    col_to_data_index = {
+        '价格': 0, '标题': 1, '想要人数': 2,
+        '商品ID': 3, '分类ID': 4, '卖家': 5, '地区': 6
+    }
+    
+    data_idx = col_to_data_index.get(column, -1)
+    if data_idx < 0 or not item_ids:
+        return
+    
+    # 构建排序键
+    def get_sort_key(i):
+        data_lists = [prices, titles, want_counts, item_ids, ccat_ids, user_nicks, areas]
+        val = data_lists[data_idx][i] if i < len(data_lists[data_idx]) else ''
+        
+        # 数字类型按数值排序
+        if column in ('价格', '想要人数', '商品ID', '分类ID'):
+            try:
+                val_float = float(val)
+                if column == '价格' and isinstance(val, str) and val.startswith('¥'):
+                    val_float = float(val.replace('¥', '').strip())
+                return (0, val_float) if not sort_reverse else (0, -val_float)
+            except (ValueError, TypeError):
+                pass
+        
+        # 字符串按文本排序
+        return (1, str(val).lower()) if not sort_reverse else (1, str(val).lower(), True)
+    
+    # 生成排序列表
+    indices = list(range(len(item_ids)))
+    indices.sort(key=get_sort_key)
+
+    # 同步重排所有数据列表（保证 tree.index() 能正确映射到数据位置）
+    prices = [prices[i] for i in indices]
+    titles = [titles[i] for i in indices]
+    want_counts = [want_counts[i] for i in indices]
+    item_ids = [item_ids[i] for i in indices]
+    ccat_ids = [ccat_ids[i] for i in indices]
+    urls = [urls[i] for i in indices]
+    user_nicks = [user_nicks[i] for i in indices]
+    areas = [areas[i] for i in indices]
+    pic_urls = [pic_urls[i] for i in indices]
+
+    # 清空并重新填充表格（与数据列表顺序一致）
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+
+    for i in range(len(item_ids)):
+        clean_title = ' '.join(str(titles[i]).splitlines()).strip()
+        if len(clean_title) > 80:
+            clean_title = clean_title[:78] + '…'
+        tree.insert('', 'end', values=(
+            prices[i], clean_title, want_counts[i],
+            item_ids[i], ccat_ids[i],
+            user_nicks[i], areas[i]
+        ))
+    
+    # 更新表头指示（在标题后加 ↑/↓）
+    for c in visible_columns:
+        heading_text = c
+        if c == column:
+            heading_text += ' ↓' if sort_reverse else ' ↑'
+        tree.heading(c, text=heading_text)
 
 def main():
     """主程序入口（GUI）"""
-    global tree, entry_keyword
-    
+    global tree, entry_keyword, visible_columns
+
     # 创建主窗口
     root = tk.Tk()
     root.title("闲鱼转卖助手 2.0【鱼小铺版】")
-    root.geometry("1200x700")
-    
+    root.geometry("1550x850")
+    root.minsize(1100, 650)
+
     # 设置样式
     style = Style()
     style.theme_use('clam')
-    
-    # 创建主框架
-    main_frame = ttk.Frame(root, padding="10")
-    main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-    
-    # 输入框和按钮框架（第一行）
-    input_frame = ttk.Frame(main_frame)
-    input_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-    
-    ttk.Label(input_frame, text="关键词：").pack(side=tk.LEFT, padx=5)
-    entry_keyword = ttk.Entry(input_frame, width=30)
-    entry_keyword.pack(side=tk.LEFT, padx=5)
-    
-    ttk.Button(input_frame, text="验证Cookie", command=get_and_validate_cookies).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame, text="抓取数据", command=lambda: fetch_data(entry_keyword.get().strip())).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame, text="下一页", command=fetch_next_page_data).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame, text="清空列表", command=clear_lists).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame, text="打开链接", command=open_url).pack(side=tk.LEFT, padx=5)
-    
-    # 第二行按钮框架（导出和配置）
-    input_frame2 = ttk.Frame(main_frame)
-    input_frame2.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-    
-    ttk.Button(input_frame2, text="导出CSV", command=export_to_csv).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame2, text="导出Excel", command=export_to_excel).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame2, text="保存配置", command=save_config).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame2, text="加载配置", command=load_config).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame2, text="下载图片", command=lambda: download_images(urls)).pack(side=tk.LEFT, padx=5)
-    ttk.Button(input_frame2, text="设置地区", command=set_region_codes_dialog).pack(side=tk.LEFT, padx=5)
-    
-    # 第三行按钮框架（转卖功能）
-    input_frame3 = ttk.Frame(main_frame)
-    input_frame3.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-    
-    ttk.Button(input_frame3, text="一键转卖", command=print_selected_row_info).pack(side=tk.LEFT, padx=5)
-    
-    # 创建表格（优化列宽和布局）
-    tree_frame = ttk.Frame(main_frame)
-    tree_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+    # Treeview 视觉优化：更大字体、固定行高（防止换行内容撑高行）
+    style.configure('Treeview',
+                    font=('Microsoft YaHei UI', 10),
+                    rowheight=30)
+    style.configure('Treeview.Heading',
+                    font=('Microsoft YaHei UI', 10, 'bold'))
+    style.map('Treeview',
+              background=[('selected', '#0078d4')],
+              foreground=[('selected', 'white')])
 
-    # 水平滚动条
+    # 创建主框架
+    main_frame = ttk.Frame(root, padding="8")
+    main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+    # ===== 第一行：搜索控制 =====
+    input_frame = ttk.Frame(main_frame)
+    input_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
+
+    ttk.Label(input_frame, text="关键词：").pack(side=tk.LEFT, padx=(0, 4))
+    entry_keyword = ttk.Entry(input_frame, width=28)
+    entry_keyword.pack(side=tk.LEFT, padx=(0, 10))
+
+    ttk.Button(input_frame, text="验证Cookie", command=get_and_validate_cookies).pack(side=tk.LEFT, padx=3)
+    ttk.Button(input_frame, text="抓取数据", command=lambda: goto_page(1)).pack(side=tk.LEFT, padx=3)
+    ttk.Button(input_frame, text="上一页", command=lambda: goto_page(page_number - 1)).pack(side=tk.LEFT, padx=3)
+    ttk.Button(input_frame, text="下一页", command=lambda: goto_page(page_number + 1)).pack(side=tk.LEFT, padx=3)
+
+    # 页码状态标签
+    page_label = ttk.Label(input_frame, text="第 1 页")
+    page_label.pack(side=tk.LEFT, padx=10)
+
+    ttk.Button(input_frame, text="清空", command=clear_lists).pack(side=tk.LEFT, padx=3)
+    ttk.Button(input_frame, text="打开链接", command=open_url).pack(side=tk.LEFT, padx=3)
+
+    # ===== 第二行：工具栏 =====
+    input_frame2 = ttk.Frame(main_frame)
+    input_frame2.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
+
+    ttk.Button(input_frame2, text="导出CSV", command=export_to_csv).pack(side=tk.LEFT, padx=3)
+    ttk.Button(input_frame2, text="导出Excel", command=export_to_excel).pack(side=tk.LEFT, padx=3)
+    ttk.Separator(input_frame2, orient='vertical').pack(side=tk.LEFT, fill='y', padx=6)
+    ttk.Button(input_frame2, text="下载图片", command=lambda: download_images(urls)).pack(side=tk.LEFT, padx=3)
+    ttk.Button(input_frame2, text="设置地区", command=set_region_codes_dialog).pack(side=tk.LEFT, padx=3)
+    ttk.Separator(input_frame2, orient='vertical').pack(side=tk.LEFT, fill='y', padx=6)
+
+    # 统计信息标签
+    stats_label = ttk.Label(input_frame2, text="共 0 条商品", font=('Microsoft YaHei UI', 10))
+    stats_label.pack(side=tk.RIGHT, padx=5)
+
+    # ===== 第三行：转卖功能 =====
+    input_frame3 = ttk.Frame(main_frame)
+    input_frame3.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 6))
+
+    ttk.Button(input_frame3, text="🚀 一键转卖（选中项）", command=batch_resell_selected).pack(side=tk.LEFT, padx=3)
+    ttk.Label(input_frame3, text="提示：Ctrl/Shift+点击可多选 | 点击表头可排序",
+                font=('Microsoft YaHei UI', 9), foreground='gray').pack(side=tk.LEFT, padx=15)
+
+    # ===== 表格区域 =====
+    tree_frame = ttk.Frame(main_frame)
+    tree_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
     h_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL)
     h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-
-    # 垂直滚动条
     scrollbar = ttk.Scrollbar(tree_frame)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # Treeview 表格 - 优化列宽配置
+    # 列配置 — 宽度按数据内容合理分配，标题列自动填满剩余空间
+    visible_columns = ['价格', '标题', '想要人数', '商品ID', '分类ID', '卖家', '地区']
     col_config = {
-        '价格':      {'width': 55,  'anchor': 'center'},
-        '标题':      {'width': 380, 'anchor': 'w', 'minwidth': 200},
-        '想要人数':   {'width': 60,  'anchor': 'center'},
-        '商品ID':     {'width': 110, 'anchor': 'center'},
-        '分类ID':     {'width': 90,  'anchor': 'center'},
-        '链接':       {'width': 0,   'minwidth': 0},   # 隐藏链接列节省空间
-        '卖家':       {'width': 85,  'anchor': 'w'},
-        '地区':       {'width': 50,  'anchor': 'center'},
+        '价格':      {'width': 80,   'anchor': 'e',       'stretch': False},
+        '标题':      {'width': 420,  'anchor': 'w',       'stretch': True},
+        '想要人数':   {'width': 70,   'anchor': 'center',  'stretch': False},
+        '商品ID':     {'width': 130,  'anchor': 'center',  'stretch': False},
+        '分类ID':     {'width': 95,   'anchor': 'center',  'stretch': False},
+        '卖家':       {'width': 100,  'anchor': 'w',       'stretch': False},
+        '地区':       {'width': 85,   'anchor': 'w',       'stretch': False},
     }
 
-    visible_columns = [c for c in col_config if col_config[c]['width'] > 0]
     tree = Treeview(
         tree_frame,
         columns=tuple(visible_columns),
         show='headings',
+        selectmode='extended',
         yscrollcommand=scrollbar.set,
         xscrollcommand=h_scrollbar.set,
-        height=22
+        height=25
     )
 
-    for col in visible_columns:
-        tree.heading(col, text=col)
+    # 配置列 + 绑定表头点击排序事件
+    for i, col in enumerate(visible_columns):
         cfg = col_config[col]
-        tree.column(col, width=cfg['width'], anchor=cfg.get('anchor', 'w'), minwidth=cfg.get('minwidth', cfg['width']))
+        tree.heading(col, text=col)
+        stretch_opt = cfg.get('stretch', False)
+        tree.column(col, width=cfg['width'], anchor=cfg['anchor'],
+                    minwidth=max(cfg['width'] // 2, 50), stretch=stretch_opt)
 
+    # 绑定表头点击排序（通过 identify_region 判断点击位置）
+    def on_tree_click(event):
+        region = tree.identify_region(event.x, event.y)
+        if region == 'heading':
+            on_tree_heading_click(event)
+        else:
+            on_tree_select_change(event)
+
+    tree.bind('<ButtonRelease-1>', on_tree_click)
     tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.config(command=tree.yview)
     h_scrollbar.config(command=tree.xview)
-    
-    # 配置网格权重
+
+    # 网格权重
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
     main_frame.columnconfigure(0, weight=1)
     main_frame.rowconfigure(3, weight=1)
-    
+
+    # 持久化引用供其他函数使用
+    global _page_label, _stats_label
+    _page_label = page_label
+    _stats_label = stats_label
+
     # 启动主循环
     root.mainloop()
+
+def on_tree_select_change(event):
+    """选择变化时更新统计信息"""
+    if _stats_label is None:
+        return
+    selected = tree.selection()
+    total = len(item_ids)
+    if selected:
+        count = len(selected)
+        _stats_label.config(text=f"已选 {count}/{total} 条")
+    else:
+        _stats_label.config(text=f"共 {total} 条商品 | 已选 0 条")
 
 if __name__ == "__main__":
     main()
