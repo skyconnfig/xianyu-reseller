@@ -252,7 +252,7 @@ def build_payload(param1, param2):
     return {
         'keyword': param2,
         'pageNo': param1,
-        'pageSize': 20,      # PC 搜索 API 实际最大返回约 20 条/页
+        'pageSize': 10,      # 闲鱼 PC 搜索 API 固定上限为 10，设多也无效
         'searchFrom': 'search',
         'fluctuationUrl': '',
         'fluctuationData': ''
@@ -300,14 +300,28 @@ def _fetch_single_page(page_no, keyword):
         json_data = response.json()
 
         if 'ret' in json_data:
-            ret_code = json_data['ret'][0] if json_data['ret'] else ''
+            ret_all = json_data['ret']
+            ret_code = ret_all[0] if ret_all else ''
+            
+            # 令牌过期 → 需要重新验证
+            if 'TOKEN' in ret_code.upper():
+                return (None, '闲鱼Token已过期，请重新验证Cookie！')
+            
+            # 限流/被挤爆 → 可重试
+            if 'RGV587' in str(ret_all) or '挤爆' in str(ret_all):
+                return (None, 'RGV587_LIMIT')  # 特殊标记，上层可重试
+            
             if 'FAIL' in ret_code or 'ERROR' in ret_code:
                 return (None, f'API错误：{ret_code}')
 
         outer_data = json_data.get('data', {})
         if not outer_data:
-            return ([], None)  # 空结果不算错误
+            return ([], None)
 
+        # 限流响应特征：data 只有 url/dialogSize，没有 resultList
+        if 'resultList' not in outer_data and ('url' in outer_data or 'dialogSize' in outer_data):
+            return (None, 'RGV587_LIMIT')
+        
         return (outer_data.get('resultList', []), None)
 
     except requests.exceptions.Timeout:
@@ -373,7 +387,7 @@ def _parse_item(item, seen_ids):
 
 
 def fetch_data(keyword):
-    """抓取全部数据 —— 遍历所有页直到无更多结果"""
+    """抓取全部数据 —— 智能翻页去重，直到无可获取的新商品"""
     global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, pic_urls
 
     if not keyword:
@@ -385,13 +399,20 @@ def fetch_data(keyword):
         messagebox.showerror('错误', '请先验证Cookie！')
         return
 
-    # 准备抓取
+    # 闲鱼 PC 搜索 API 特征（实测）:
+    #  - 每页固定返回 10 条，pageSize 设多无效
+    #  - pageNo 翻页高度重复，每 3-5 页才有少数新结果
+    #  - 连续请求易触发"被挤爆啦"限流
+    # 策略: 遍历 50 页，去重聚合，连续 5 页无新数据或限流时停止
     page_no = 1
-    max_pages = 50   # 安全上限：最多 50 页（pageSize=20，即最多 1000 条）
+    max_pages = 50
     total_new = 0
-    seen_ids = set(item_ids)  # 从已有数据去重
+    zero_new_streak = 0       # 连续无新数据页数
+    max_zero_streak = 5       # 连续 N 页无新数据则停止
+    limit_retries = 0         # 限流重试计数
+    max_limit_retries = 3     # 同页最多重试 3 次
+    seen_ids = set(item_ids)
 
-    # 进度对话框
     pdlg = ProgressDialog(tree.winfo_toplevel(), '搜索中', f'正在搜索 "{keyword}"...', max_pages)
 
     try:
@@ -399,13 +420,25 @@ def fetch_data(keyword):
             pdlg.update_progress(page_no, f'正在抓取第 {page_no} 页...')
 
             result_list, error = _fetch_single_page(page_no, keyword)
+            
             if error:
-                pdlg.destroy()
-                messagebox.showerror('错误', error)
-                return
+                if error == 'RGV587_LIMIT':
+                    limit_retries += 1
+                    if limit_retries > max_limit_retries:
+                        print(f'  [搜索] 连续 {max_limit_retries} 次被限流，停止搜索')
+                        break
+                    print(f'  [搜索] 第 {page_no} 页被限流 (重试 {limit_retries}/{max_limit_retries})，等待 5 秒...')
+                    pdlg.update_progress(page_no, f'被限流，等待中({limit_retries}/{max_limit_retries})...')
+                    time.sleep(5)
+                    continue  # 重试同页
+                else:
+                    # 令牌过期或其他致命错误
+                    pdlg.destroy()
+                    messagebox.showerror('错误', error)
+                    return
 
             if not result_list:
-                break  # 无更多数据，结束循环
+                break  # 无更多数据
 
             page_added = 0
             for item in result_list:
@@ -432,13 +465,18 @@ def fetch_data(keyword):
                 page_added += 1
 
             total_new += page_added
+            
+            if page_added == 0:
+                zero_new_streak += 1
+                if zero_new_streak >= max_zero_streak:
+                    print(f'  连续 {zero_new_streak} 页无新数据，停止搜索')
+                    break
+            else:
+                zero_new_streak = 0
+            
             print(f'第 {page_no} 页: 新增 {page_added} 条（累计 {total_new} 条）')
-
-            if len(result_list) == 0 or page_added == 0:
-                break  # 无更多数据 或 全部重复（已达末尾）
-
             page_no += 1
-            time.sleep(0.3)  # 轻量节流，避免触发反爬
+            time.sleep(0.5)  # 节流，避免触发限流
 
         pdlg.destroy()
 
