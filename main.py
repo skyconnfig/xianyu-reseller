@@ -401,14 +401,12 @@ def fetch_data(keyword):
 
     # 闲鱼 PC 搜索 API 特征（实测）:
     #  - 每页固定返回 10 条，pageSize 设多无效
-    #  - pageNo 翻页高度重复，每 3-5 页才有少数新结果
+    #  - pageNo 翻页有分片机制：page 1-3 是同一组结果，page 4 可能是完全不同的一组
     #  - 连续请求易触发"被挤爆啦"限流
-    # 策略: 遍历 50 页，去重聚合，连续 5 页无新数据或限流时停止
+    # 策略: 遍历全部页不提前终止（因为某页可能突然给出完全不同的结果集）
     page_no = 1
-    max_pages = 50
+    max_pages = 80          # 多翻几页，API 分片机制下不同 pageNo 返回不同结果集
     total_new = 0
-    zero_new_streak = 0       # 连续无新数据页数
-    max_zero_streak = 5       # 连续 N 页无新数据则停止
     limit_retries = 0         # 限流重试计数
     max_limit_retries = 3     # 同页最多重试 3 次
     seen_ids = set(item_ids)
@@ -465,16 +463,9 @@ def fetch_data(keyword):
                 page_added += 1
 
             total_new += page_added
-            
-            if page_added == 0:
-                zero_new_streak += 1
-                if zero_new_streak >= max_zero_streak:
-                    print(f'  连续 {zero_new_streak} 页无新数据，停止搜索')
-                    break
-            else:
-                zero_new_streak = 0
-            
-            print(f'第 {page_no} 页: 新增 {page_added} 条（累计 {total_new} 条）')
+            # 不提前终止！API 有分片机制：某页可能全是重复，
+            # 但再翻几页会突然出现完全不同的新结果集（如 pageNo=4,11,19...）
+            print(f'第 {page_no} 页: 返回{len(result_list)}条, 新增 {page_added} 条（累计 {total_new} 去重后）')
             page_no += 1
             time.sleep(0.5)  # 节流，避免触发限流
 
