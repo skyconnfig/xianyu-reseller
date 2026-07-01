@@ -95,9 +95,15 @@ entry_keyword = None
 # ==================== 工具函数 ====================
 
 def parse_cookies(cookie_str):
-    """解析 cookies 字符串"""
+    """解析 cookies 字符串（自动清理首尾空白和换行）"""
+    cookie_str = cookie_str.strip()
     try:
-        cookies = dict(item.split('=', 1) for item in cookie_str.split('; '))
+        cookies = {}
+        for item in cookie_str.split(';'):
+            item = item.strip()
+            if '=' in item:
+                k, v = item.split('=', 1)
+                cookies[k.strip()] = v.strip()
         return cookies
     except ValueError:
         messagebox.showerror('错误', 'Cookie 格式错误！')
@@ -177,8 +183,9 @@ def validate_agiso_cookies(cookies, authorization):
         return False
 
 def get_user_input(prompt, title):
-    """获取用户输入（使用 tkinter 对话框）"""
-    return simpledialog.askstring(title, prompt)
+    """获取用户输入（使用 tkinter 对话框，自动清理首尾空白）"""
+    value = simpledialog.askstring(title, prompt)
+    return value.strip() if value else ''
 
 def get_and_validate_cookies():
     """获取并验证 cookies（三步流程：闲鱼Cookie → 阿奇索Cookie → Authorization）"""
