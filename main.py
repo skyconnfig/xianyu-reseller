@@ -252,7 +252,7 @@ def build_payload(param1, param2):
     return {
         'keyword': param2,
         'pageNo': param1,
-        'pageSize': 40,
+        'pageSize': 20,      # PC 搜索 API 实际最大返回约 20 条/页
         'searchFrom': 'search',
         'fluctuationUrl': '',
         'fluctuationData': ''
@@ -387,7 +387,7 @@ def fetch_data(keyword):
 
     # 准备抓取
     page_no = 1
-    max_pages = 50   # 安全上限：最多 50 页 = 2000 条
+    max_pages = 50   # 安全上限：最多 50 页（pageSize=20，即最多 1000 条）
     total_new = 0
     seen_ids = set(item_ids)  # 从已有数据去重
 
@@ -434,8 +434,8 @@ def fetch_data(keyword):
             total_new += page_added
             print(f'第 {page_no} 页: 新增 {page_added} 条（累计 {total_new} 条）')
 
-            if len(result_list) < 40:
-                break  # 最后一页（不足 pageSize），不再继续
+            if len(result_list) == 0 or page_added == 0:
+                break  # 无更多数据 或 全部重复（已达末尾）
 
             page_no += 1
             time.sleep(0.3)  # 轻量节流，避免触发反爬
