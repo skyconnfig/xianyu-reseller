@@ -86,11 +86,7 @@ user_nicks = []
 areas = []
 pic_urls = []          # 搜索结果中的封面图URL（转卖备选）
 
-# 页码
-page_number = 1
-
 # 标签持久引用（替代递归遍历查找）
-_page_label = None
 _stats_label = None
 
 # GUI 控件
@@ -148,8 +144,6 @@ def clear_lists():
     for row in tree.get_children():
         tree.delete(row)
     # 重置统计（使用持久化引用）
-    if _page_label:
-        _page_label.config(text="第 1 页")
     if _stats_label:
         _stats_label.config(text="共 0 条商品 | 已选 0 条")
 
@@ -263,208 +257,205 @@ def build_payload(param1, param2):
         'fluctuationData': ''
     }
 
-def fetch_data(keyword):
-    """抓取数据（核心函数 - 改进版）"""
-    global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, page_number, pic_urls
-    
-    # 验证关键词
+def _fetch_single_page(page_no, keyword):
+    """抓取单页数据，返回 (result_list, error_msg)。
+    result_list 为 None 表示出错，error_msg 含错误描述。"""
     if not keyword:
-        keyword = entry_keyword.get().strip()
-    
-    if not keyword:
-        messagebox.showerror('错误', '请输入有效的关键词')
-        return
-    
-    # 验证Cookie是否已设置
+        return (None, '请输入有效的关键词')
     if not goofish_cookies:
-        messagebox.showerror('错误', '请先验证Cookie！')
-        return
-    
-    # 构建请求参数
-    payload = build_payload(page_number, keyword)
-    data_str = json.dumps(payload)
-    print(f"请求参数: {data_str}")
-    
-    # 提取 token
+        return (None, '请先验证Cookie！')
+
     token = goofish_cookies.get('_m_h5_tk', '').split('_')[0]
     if not token:
-        messagebox.showerror('错误', 'Cookie中缺少token，请重新验证Cookie！')
-        return
-    
-    # 生成签名
+        return (None, 'Cookie中缺少token，请重新验证Cookie！')
+
+    payload = build_payload(page_no, keyword)
+    data_str = json.dumps(payload)
+
     timestamp = get_current_timestamp_milliseconds()
     app_key = '34839810'
-    sign_str = f'{token}&{timestamp}&{app_key}&{data_str}'
-    sign = get_md5_hash_string(sign_str)
-    print(f"签名字符串: {sign_str}")
-    print(f"签名: {sign}")
-    
-    # 构建请求参数
+    sign = get_md5_hash_string(f'{token}&{timestamp}&{app_key}&{data_str}')
+
     params = {
-        'jsv': '2.7.2',
-        'appKey': app_key,
-        't': timestamp,
-        'sign': sign,
-        'v': '1.0',
-        'type': 'originaljson',
-        'accountSite': 'xianyu',
-        'dataType': 'json',
-        'timeout': '20000',
+        'jsv': '2.7.2', 'appKey': app_key, 't': timestamp, 'sign': sign,
+        'v': '1.0', 'type': 'originaljson', 'accountSite': 'xianyu',
+        'dataType': 'json', 'timeout': '20000',
         'api': 'mtop.taobao.idlemtopsearch.pc.search',
-        'sessionOption': 'AutoLoginOnly',
-        'spm_cnt': 'a21ybx.search.0.0',
+        'sessionOption': 'AutoLoginOnly', 'spm_cnt': 'a21ybx.search.0.0',
         'spm_pre': 'a21ybx.search.searchInput.0'
     }
-    
-    # 发送请求
+
     url = 'https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/'
     try:
-        print(f"发送请求到: {url}")
         response = requests.post(
-            url,
-            params=params,
-            cookies=goofish_cookies,
-            headers=goofish_headers,
-            data={'data': data_str},
-            verify=False,
-            timeout=30,
+            url, params=params, cookies=goofish_cookies,
+            headers=goofish_headers, data={'data': data_str},
+            verify=False, timeout=30,
             proxies={'http': None, 'https': None}
         )
-        
-        print(f"响应状态码: {response.status_code}")
-        
         if response.status_code != 200:
-            messagebox.showerror('错误', f'请求失败：{response.status_code}\n{response.text[:200]}')
-            return
-        
-        # 解析响应
-        try:
-            json_data = response.json()
-            print(f"响应数据: {json.dumps(json_data, ensure_ascii=False)[:500]}")
-        except json.JSONDecodeError as e:
-            messagebox.showerror('错误', f'JSON解析失败：{e}\n响应内容：{response.text[:200]}')
-            return
-        
-        # 检查API返回的错误
+            return (None, f'请求失败：HTTP {response.status_code}')
+
+        json_data = response.json()
+
         if 'ret' in json_data:
             ret_code = json_data['ret'][0] if json_data['ret'] else ''
             if 'FAIL' in ret_code or 'ERROR' in ret_code:
-                messagebox.showerror('API错误', f'API返回错误：{ret_code}\n详细信息：{json_data.get("data", {}).get("retMsg", "")}')
-                return
-        
-        # 提取数据
+                return (None, f'API错误：{ret_code}')
+
         outer_data = json_data.get('data', {})
         if not outer_data:
-            messagebox.showinfo('提示', '未获取到数据，请检查Cookie是否有效或关键词是否正确')
-            return
-        
-        result_list = outer_data.get('resultList', [])
-        if not result_list:
-            messagebox.showinfo('提示', '未找到相关商品')
-            return
-        
-        print(f"获取到 {len(result_list)} 个商品")
-        
-        # 处理每个商品
-        new_count = 0
-        for item in result_list:
-            try:
-                data = item.get('data', {})
-                item_data = data.get('item', {})
-                main_data = item_data.get('main', {})
-                
-                # 提取点击参数
-                click_param = main_data.get('clickParam', {})
-                args = click_param.get('args', {})
-                
-                # 提取 exContent（包含商品详情）
-                ex_content = main_data.get('exContent', {})
-                detail_params = ex_content.get('detailParams', {})
-                
-                # 从 detailParams 提取商品信息
-                title = detail_params.get('title', '')
-                # 清洗标题：去掉换行符/制表符，避免 Treeview 行被撑高
-                title = ' '.join(title.splitlines()).strip()
-                # 超长截断到 80 字符，防止标题列过宽影响显示
-                if len(title) > 80:
-                    title = title[:78] + '…'
-                user_nick = detail_params.get('userNick', '')
-                price_str = detail_params.get('soldPrice', '0')
-                
-                # 从 args 提取更多信息
-                area = ex_content.get('area', '') or args.get('p_city', '')
-                want_count = int(args.get('wantNum', 0)) if str(args.get('wantNum', '0')).isdigit() else 0
-                item_id = args.get('item_id', '') or args.get('id', '')
-                ccat_id = args.get('cCatId', '')
-                fish_tags = ex_content.get('fishTags', {})
-                r3_tag_list = fish_tags.get('r3', {}).get('tagList', []) if isinstance(fish_tags, dict) else []
-                
-                # 从 fishTags.r3 提取想要人数（如 "488人想要"）
-                if want_count == 0 and r3_tag_list:
-                    for tag in r3_tag_list:
-                        tag_data = tag.get('data', {})
-                        content = tag_data.get('content', '')
-                        # 匹配 "488人想要" 格式
-                        want_match = re.search(r'(\d+)人想要', content)
-                        if want_match:
-                            want_count = int(want_match.group(1))
-                            break
-                
-                # 转换价格为数值
-                try:
-                    price = float(price_str)
-                except (ValueError, TypeError):
-                    price = 0
-                
-                # 提取封面图URL（转卖时备选）
-                pic_url = ex_content.get('picUrl', '')
-                
-                # 构建商品链接
-                item_url = f'https://www.goofish.com/item?id={item_id}' if item_id else 'Error：url'
-                
-                # 检查是否已存在
-                if item_id and item_id not in item_ids:
-                    # 添加到全局列表
-                    prices.append(price)
-                    titles.append(title)
-                    want_counts.append(want_count)
-                    item_ids.append(item_id)
-                    ccat_ids.append(ccat_id)
-                    urls.append(item_url)
-                    user_nicks.append(user_nick)
-                    areas.append(area)
-                    pic_urls.append(pic_url)
-                    
-                    # 添加到表格（按可见列顺序）
-                    tree.insert('', 'end', values=(
-                        price,
-                        title,
-                        want_count,
-                        item_id,
-                        ccat_id,
-                        user_nick,
-                        area
-                    ))
-                    
-                    new_count += 1
-                    
-            except Exception as e:
-                print(f"处理商品时出错: {e}")
-                continue
-        
-        messagebox.showinfo('成功', f'成功抓取 {new_count} 个新商品（总计 {len(item_ids)} 个）')
-        
-        # 更新页码和统计显示
-        _update_page_stats()
-        
+            return ([], None)  # 空结果不算错误
+
+        return (outer_data.get('resultList', []), None)
+
     except requests.exceptions.Timeout:
-        messagebox.showerror('错误', '请求超时，请检查网络连接')
+        return (None, '请求超时，请检查网络连接')
     except requests.exceptions.RequestException as e:
-        messagebox.showerror('错误', f'请求异常：{e}')
+        return (None, f'请求异常：{e}')
     except Exception as e:
-        messagebox.showerror('错误', f'程序异常：{e}')
+        return (None, f'程序异常：{e}')
+
+
+def _parse_item(item, seen_ids):
+    """解析单条商品数据，返回 dict 或 None（已存在/无效）"""
+    try:
+        data = item.get('data', {})
+        item_data = data.get('item', {})
+        main_data = item_data.get('main', {})
+
+        click_param = main_data.get('clickParam', {})
+        args = click_param.get('args', {})
+
+        ex_content = main_data.get('exContent', {})
+        detail_params = ex_content.get('detailParams', {})
+
+        title = detail_params.get('title', '')
+        title = ' '.join(title.splitlines()).strip()
+        if len(title) > 80:
+            title = title[:78] + '…'
+
+        user_nick = detail_params.get('userNick', '')
+        price_str = detail_params.get('soldPrice', '0')
+        area = ex_content.get('area', '') or args.get('p_city', '')
+        want_count = int(args.get('wantNum', 0)) if str(args.get('wantNum', '0')).isdigit() else 0
+        item_id = args.get('item_id', '') or args.get('id', '')
+        ccat_id = args.get('cCatId', '')
+
+        fish_tags = ex_content.get('fishTags', {})
+        r3_list = fish_tags.get('r3', {}).get('tagList', []) if isinstance(fish_tags, dict) else []
+        if want_count == 0 and r3_list:
+            for tag in r3_list:
+                m = re.search(r'(\d+)人想要', tag.get('data', {}).get('content', ''))
+                if m:
+                    want_count = int(m.group(1))
+                    break
+
+        try:
+            price = float(price_str)
+        except (ValueError, TypeError):
+            price = 0
+
+        if not item_id or item_id in seen_ids:
+            return None
+
+        return {
+            'price': price, 'title': title, 'want_count': want_count,
+            'item_id': item_id, 'ccat_id': ccat_id,
+            'user_nick': user_nick, 'area': area,
+            'url': f'https://www.goofish.com/item?id={item_id}',
+            'pic_url': ex_content.get('picUrl', '')
+        }
+    except Exception as e:
+        print(f"解析商品出错: {e}")
+        return None
+
+
+def fetch_data(keyword):
+    """抓取全部数据 —— 遍历所有页直到无更多结果"""
+    global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, pic_urls
+
+    if not keyword:
+        keyword = entry_keyword.get().strip()
+    if not keyword:
+        messagebox.showerror('错误', '请输入有效的关键词')
+        return
+    if not goofish_cookies:
+        messagebox.showerror('错误', '请先验证Cookie！')
+        return
+
+    # 准备抓取
+    page_no = 1
+    max_pages = 50   # 安全上限：最多 50 页 = 2000 条
+    total_new = 0
+    seen_ids = set(item_ids)  # 从已有数据去重
+
+    # 进度对话框
+    pdlg = ProgressDialog(tree.winfo_toplevel(), '搜索中', f'正在搜索 "{keyword}"...', max_pages)
+
+    try:
+        while page_no <= max_pages:
+            pdlg.update_progress(page_no, f'正在抓取第 {page_no} 页...')
+
+            result_list, error = _fetch_single_page(page_no, keyword)
+            if error:
+                pdlg.destroy()
+                messagebox.showerror('错误', error)
+                return
+
+            if not result_list:
+                break  # 无更多数据，结束循环
+
+            page_added = 0
+            for item in result_list:
+                parsed = _parse_item(item, seen_ids)
+                if parsed is None:
+                    continue
+
+                seen_ids.add(parsed['item_id'])
+                prices.append(parsed['price'])
+                titles.append(parsed['title'])
+                want_counts.append(parsed['want_count'])
+                item_ids.append(parsed['item_id'])
+                ccat_ids.append(parsed['ccat_id'])
+                urls.append(parsed['url'])
+                user_nicks.append(parsed['user_nick'])
+                areas.append(parsed['area'])
+                pic_urls.append(parsed['pic_url'])
+
+                tree.insert('', 'end', values=(
+                    parsed['price'], parsed['title'], parsed['want_count'],
+                    parsed['item_id'], parsed['ccat_id'],
+                    parsed['user_nick'], parsed['area']
+                ))
+                page_added += 1
+
+            total_new += page_added
+            print(f'第 {page_no} 页: 新增 {page_added} 条（累计 {total_new} 条）')
+
+            if len(result_list) < 40:
+                break  # 最后一页（不足 pageSize），不再继续
+
+            page_no += 1
+            time.sleep(0.3)  # 轻量节流，避免触发反爬
+
+        pdlg.destroy()
+
+        if total_new == 0:
+            messagebox.showinfo('提示', '未找到相关商品')
+        else:
+            messagebox.showinfo('完成', f'搜索完成！共找到 {total_new} 条商品（总计 {len(item_ids)} 条）')
+
+    except Exception as e:
+        try:
+            pdlg.destroy()
+        except:
+            pass
+        messagebox.showerror('错误', f'抓取异常：{e}')
         import traceback
         traceback.print_exc()
+
+    _update_page_stats()
 
 def download_images(image_urls):
     """下载图片（多线程）"""
@@ -505,15 +496,6 @@ def download_images(image_urls):
                 results.append(result)
     
     return results
-
-def goto_page(page_no):
-    """跳转到指定页（清空旧数据后重新加载）"""
-    global page_number
-    if page_no < 1:
-        return
-    page_number = page_no
-    clear_lists()
-    fetch_data(entry_keyword.get().strip())
 
 def open_url():
     """打开 URL"""
@@ -1283,9 +1265,7 @@ def export_to_excel():
 # ==================== 辅助函数 ====================
 
 def _update_page_stats():
-    """更新页码和统计标签显示"""
-    if _page_label:
-        _page_label.config(text=f"第 {page_number} 页")
+    """更新统计标签显示"""
     if _stats_label:
         _stats_label.config(text=f"共 {len(item_ids)} 条商品 | 已选 0 条")
 
@@ -1588,14 +1568,7 @@ def main():
     entry_keyword.pack(side=tk.LEFT, padx=(0, 10))
 
     ttk.Button(input_frame, text="验证Cookie", command=get_and_validate_cookies).pack(side=tk.LEFT, padx=3)
-    ttk.Button(input_frame, text="抓取数据", command=lambda: goto_page(1)).pack(side=tk.LEFT, padx=3)
-    ttk.Button(input_frame, text="上一页", command=lambda: goto_page(page_number - 1)).pack(side=tk.LEFT, padx=3)
-    ttk.Button(input_frame, text="下一页", command=lambda: goto_page(page_number + 1)).pack(side=tk.LEFT, padx=3)
-
-    # 页码状态标签
-    page_label = ttk.Label(input_frame, text="第 1 页")
-    page_label.pack(side=tk.LEFT, padx=10)
-
+    ttk.Button(input_frame, text="搜索全部", command=lambda: fetch_data(entry_keyword.get().strip())).pack(side=tk.LEFT, padx=3)
     ttk.Button(input_frame, text="清空", command=clear_lists).pack(side=tk.LEFT, padx=3)
     ttk.Button(input_frame, text="打开链接", command=open_url).pack(side=tk.LEFT, padx=3)
 
@@ -1681,8 +1654,7 @@ def main():
     main_frame.rowconfigure(3, weight=1)
 
     # 持久化引用供其他函数使用
-    global _page_label, _stats_label
-    _page_label = page_label
+    global _stats_label
     _stats_label = stats_label
 
     # 启动主循环
