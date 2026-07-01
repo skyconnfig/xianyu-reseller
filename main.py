@@ -540,85 +540,162 @@ def save_config():
 # ==================== 一键转卖功能（发布相关） ====================
 
 def download_file(url, filename=None):
-    """下载文件"""
+    """下载文件到临时目录"""
     try:
+        print(f'  [下载] URL: {url[:100]}...')
+
         response = requests.get(
             url, stream=True, timeout=30, verify=False,
             cookies=goofish_cookies, headers=goofish_headers,
             proxies={'http': None, 'https': None}
         )
+
+        print(f'  [下载] 状态码: {response.status_code}, Content-Length: {response.headers.get("Content-Length", "unknown")}')
         response.raise_for_status()
-        
+
         if not filename:
-            from urllib.parse import urlparse
-            parsed_url = urlparse(url)
-            filename = os.path.basename(parsed_url.path)
-        
-        save_dir = os.path.join(os.getcwd(), 'downloaded_file')
+            filename = f"img_{int(time.time())}.jpg"
+
+        # 统一保存到 temp_img 目录（与转换函数同目录）
+        save_dir = os.path.join(os.getcwd(), 'temp_img')
         os.makedirs(save_dir, exist_ok=True)
         save_path = os.path.join(save_dir, filename)
-        
+
         with open(save_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+
+        print(f'  [下载] 已保存: {save_path} ({os.path.getsize(save_path)} bytes)')
         return save_path
     except requests.exceptions.RequestException as e:
-        print(f'下载过程中出现错误: {e}')
+        print(f'  [下载] 失败: {e}')
         return None
 
 def convert_images_to_png_in_directory():
-    """将目录中的图片转换为PNG格式"""
-    current_directory = os.getcwd()
-    supported_extensions = ('.heic', '.jpg', '.jpeg')
+    """将 temp_img 目录中的图片转换为PNG格式"""
+    img_dir = os.path.join(os.getcwd(), 'temp_img')
+    supported_extensions = ('.heic', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+
+    if not os.path.exists(img_dir):
+        print('  [转换] temp_img 不存在，跳过')
+        return
+
+    converted_count = 0
     try:
-        for filename in os.listdir(current_directory):
-            if filename.lower().endswith(supported_extensions):
-                source_path = os.path.join(current_directory, filename)
+        for filename in os.listdir(img_dir):
+            if filename.lower().endswith(supported_extensions) and not filename.lower().endswith('.png'):
+                source_path = os.path.join(img_dir, filename)
                 try:
                     image = imageio.imread(source_path)
                     base_name, _ = os.path.splitext(filename)
                     png_filename = f'{base_name}.png'
-                    png_path = os.path.join(current_directory, png_filename)
+                    png_path = os.path.join(img_dir, png_filename)
                     imageio.imwrite(png_path, image)
                     os.remove(source_path)
+                    converted_count += 1
                 except Exception as e:
-                    print(f'文件处理错误: {e}')
+                    print(f'  [转换] 文件错误 {filename}: {e}')
     except Exception as e:
-        print(f'转换过程中出现错误: {e}')
+        print(f'  [转换] 过程出错: {e}')
+    if converted_count:
+        print(f'  [转换] 转换了 {converted_count} 个文件为 PNG')
 
 def find_png_files_without_extension():
-    """查找当前目录及子目录中所有PNG文件"""
-    png_filenames_no_ext = []
-    png_filepaths_no_ext = []
-    base_dir = os.getcwd()
+    """查找 temp_img 目录中的所有 PNG 文件"""
+    png_paths = []
+    base_names = []
+    img_dir = os.path.join(os.getcwd(), 'temp_img')
+
+    if not os.path.exists(img_dir):
+        print('  [查找PNG] temp_img 不存在')
+        return base_names, png_paths
+
     try:
-        for root_dir, dirs, files in os.walk(base_dir):
-            for filename in files:
-                if filename.lower().endswith('.png'):
-                    base_name, _ = os.path.splitext(filename)
-                    png_filenames_no_ext.append(base_name)
-                    png_filepaths_no_ext.append(os.path.join(root_dir, filename))
+        for filename in os.listdir(img_dir):
+            if filename.lower().endswith('.png'):
+                filepath = os.path.join(img_dir, filename)
+                png_paths.append(filepath)
+                base_names.append(os.path.splitext(filename)[0])
     except Exception as e:
-        print(f'搜索过程中出现错误: {e}')
-    return png_filenames_no_ext, png_filepaths_no_ext
+        print(f'  [查找PNG] 出错: {e}')
+
+    print(f'  [查找PNG] 找到 {len(png_paths)} 个 PNG: {[os.path.basename(p) for p in png_paths]}')
+    return base_names, png_paths
 
 def delete_png_files_recursively():
-    """递归删除当前目录及子目录中的所有PNG文件"""
-    base_dir = os.getcwd()
-    for root_dir, dirs, files in os.walk(base_dir):
-        for filename in files:
-            if filename.lower().endswith('.png'):
+    """清理 temp_img 临时目录"""
+    img_dir = os.path.join(os.getcwd(), 'temp_img')
+    try:
+        if os.path.exists(img_dir):
+            count = 0
+            for filename in os.listdir(img_dir):
+                filepath = os.path.join(img_dir, filename)
                 try:
-                    os.remove(os.path.join(root_dir, filename))
-                except:
+                    os.remove(filepath)
+                    count += 1
+                except Exception:
                     pass
+            try:
+                os.rmdir(img_dir)
+            except Exception:
+                pass
+            if count:
+                print(f'  [清理] 删除了 {count} 个临时文件')
+    except Exception as e:
+        print(f'  [清理] 出错: {e}')
 
 def upload_file(file_path):
     """上传文件到Agiso服务器"""
     global global_image_ids, global_oss_keys, global_agiso_img_urls
-    
+
     url = 'https://aldsidle.agiso.com/api/GoodsManage/MediaUpload'
     file_name = os.path.basename(file_path)
+
+    print(f'  [上传] 文件: {file_name} ({os.path.getsize(file_path)} bytes)')
+    
+    # 检查 Agiso 认证是否就绪
+    if not agiso_cookies:
+        print(f'  [上传] 错误: 阿奇索 Cookie 未设置！')
+        return False
+    if not user_authorization:
+        print(f'  [上传] 错误: Authorization 未设置！')
+        return False
+    
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'files': (file_name, f, 'image/png')}
+            response = requests.post(
+                url,
+                cookies=agiso_cookies,
+                headers=agiso_upload_headers,
+                files=files,
+                verify=False,
+                proxies={'http': None, 'https': None}
+            )
+        
+        print(f'  [上传] 状态码: {response.status_code}, 响应: {response.text[:200]}')
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            if response_data.get('succeeded') or response_data.get('isSuccess'):
+                data = response_data.get('data', {})
+                image_id = data.get('imageId', '')
+                oss_key = data.get('ossKey', '')
+                agiso_url = data.get('agisoImgUrl', '')
+                global_image_ids.append(image_id)
+                global_oss_keys.append(oss_key)
+                global_agiso_img_urls.append(agiso_url)
+                print(f'  [上传] 成功! imageId={image_id}')
+                return True
+            else:
+                print(f'  [上传] API 返回失败: {response_data.get("message", "unknown")}')
+                return False
+        else:
+            print(f'  [上传] HTTP 错误: {response.status_code}')
+            return False
+    except Exception as e:
+        print(f'  [上传] 异常: {e}')
+        return False
     
     try:
         with open(file_path, 'rb') as f:
@@ -845,13 +922,7 @@ def print_selected_row_info():
     print(f'商品描述: {global_describe[:100]}...')
     
     # 开始处理图片和发布
-            process_images_with_progress(img_urls)
-        else:
-            messagebox.showerror('错误', f'获取商品详情失败：HTTP {response.status_code}')
-    except Exception as e:
-        messagebox.showerror('错误', f'获取商品详情失败：{e}')
-        import traceback
-        traceback.print_exc()
+    process_images_with_progress(img_urls)
 
 def publish():
     """发布商品到Agiso"""
