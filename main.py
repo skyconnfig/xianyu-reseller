@@ -93,6 +93,7 @@ _stats_label = None
 # GUI 控件
 tree = None
 entry_keyword = None
+entry_pages = None
 
 # 发布相关全局变量
 global_image_ids = []       # 图片ID列表
@@ -386,8 +387,12 @@ def _parse_item(item, seen_ids):
         return None
 
 
-def fetch_data(keyword):
-    """抓取全部数据 —— 智能翻页去重，直到无可获取的新商品"""
+def fetch_data(keyword, max_pages=None):
+    """抓取数据 —— 智能翻页去重
+    Args:
+        keyword: 搜索关键词
+        max_pages: 抓取页数（None 表示从 GUI 控件读取，否则使用传入值）
+    """
     global prices, titles, want_counts, item_ids, ccat_ids, urls, user_nicks, areas, pic_urls
 
     if not keyword:
@@ -399,13 +404,21 @@ def fetch_data(keyword):
         messagebox.showerror('错误', '请先验证Cookie！')
         return
 
+    # 从 GUI 控件读取页数（如果未传入）
+    if max_pages is None:
+        try:
+            max_pages = int(entry_pages.get().strip())
+            if max_pages < 1:
+                max_pages = 20
+        except (ValueError, AttributeError):
+            max_pages = 20
+
     # 闲鱼 PC 搜索 API 特征（实测）:
     #  - 每页固定返回 10 条，pageSize 设多无效
     #  - pageNo 翻页有分片机制：page 1-3 是同一组结果，page 4 可能是完全不同的一组
     #  - 连续请求易触发"被挤爆啦"限流
     # 策略: 遍历全部页不提前终止（因为某页可能突然给出完全不同的结果集）
     page_no = 1
-    max_pages = 80          # 多翻几页，API 分片机制下不同 pageNo 返回不同结果集
     total_new = 0
     limit_retries = 0         # 限流重试计数
     max_limit_retries = 3     # 同页最多重试 3 次
@@ -415,7 +428,7 @@ def fetch_data(keyword):
 
     try:
         while page_no <= max_pages:
-            pdlg.update_progress(page_no, f'正在抓取第 {page_no} 页...')
+            pdlg.update_progress(page_no, f'正在抓取第 {page_no}/{max_pages} 页 ({keyword})...')
 
             result_list, error = _fetch_single_page(page_no, keyword)
             
@@ -472,9 +485,9 @@ def fetch_data(keyword):
         pdlg.destroy()
 
         if total_new == 0:
-            messagebox.showinfo('提示', '未找到相关商品')
+            messagebox.showinfo('提示', f'未找到相关商品（已搜索 {min(page_no-1, max_pages)} 页）')
         else:
-            messagebox.showinfo('完成', f'搜索完成！共找到 {total_new} 条商品（总计 {len(item_ids)} 条）')
+            messagebox.showinfo('完成', f'搜索完成！共找到 {total_new} 条商品（总计 {len(item_ids)} 条，已搜索 {min(page_no-1, max_pages)}/{max_pages} 页）')
 
     except Exception as e:
         try:
@@ -1687,13 +1700,74 @@ def on_tree_heading_click(event):
             heading_text += ' ↓' if sort_reverse else ' ↑'
         tree.heading(c, text=heading_text)
 
+def check_license():
+    """检查软件使用期限（自首次运行起30天）"""
+    import os, datetime
+    appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+    license_dir = os.path.join(appdata, 'XYReseller')
+    license_file = os.path.join(license_dir, '.install_date')
+    
+    try:
+        if not os.path.isdir(license_dir):
+            os.makedirs(license_dir, exist_ok=True)
+        
+        if not os.path.isfile(license_file):
+            # 首次运行，记录安装日期
+            with open(license_file, 'w', encoding='utf-8') as f:
+                f.write(datetime.date.today().isoformat())
+            return True
+        
+        # 读取首次运行日期
+        with open(license_file, 'r', encoding='utf-8') as f:
+            raw = f.read().strip()
+        first_run = datetime.date.fromisoformat(raw)
+        today = datetime.date.today()
+        days_used = (today - first_run).days
+        
+        if days_used > 30:
+            return False, days_used, first_run
+        return True, days_used, first_run
+    except Exception:
+        # 异常情况下允许使用（不误杀）
+        return True
+
 def main():
     """主程序入口（GUI）"""
-    global tree, entry_keyword, visible_columns
+    global tree, entry_keyword, entry_pages, visible_columns
+
+    # ========== 许可检查 ==========
+    license_result = check_license()
+    if isinstance(license_result, tuple):
+        ok, days_used, first_run = license_result
+        if not ok:
+            root_temp = tk.Tk()
+            root_temp.withdraw()
+            messagebox.showerror(
+                '试用已到期',
+                f'软件试用期（30天）已结束！\n\n'
+                f'首次使用日期：{first_run}\n'
+                f'已使用天数：{days_used} 天\n\n'
+                f'请联系开发者获取授权。'
+            )
+            root_temp.destroy()
+            sys.exit(0)
+        # 距到期不足5天时弹窗提醒
+        remaining = 30 - days_used
+        if 0 < remaining <= 5:
+            root_temp = tk.Tk()
+            root_temp.withdraw()
+            messagebox.showinfo(
+                '试用即将到期',
+                f'您的软件试用期还剩 {remaining} 天\n'
+                f'（首次使用：{first_run}）\n\n'
+                f'到期后将无法使用，请联系开发者获取授权。'
+            )
+            root_temp.destroy()
+    # =================================
 
     # 创建主窗口
     root = tk.Tk()
-    root.title("闲鱼转卖助手 2.0【鱼小铺版】")
+    root.title("XY超级转卖助手")
     root.geometry("1550x850")
     root.minsize(1100, 650)
 
@@ -1721,6 +1795,11 @@ def main():
     ttk.Label(input_frame, text="关键词：").pack(side=tk.LEFT, padx=(0, 4))
     entry_keyword = ttk.Entry(input_frame, width=28)
     entry_keyword.pack(side=tk.LEFT, padx=(0, 10))
+
+    ttk.Label(input_frame, text="页数：").pack(side=tk.LEFT, padx=(0, 2))
+    entry_pages_widget = ttk.Spinbox(input_frame, from_=1, to=200, width=5)
+    entry_pages_widget.set(20)
+    entry_pages_widget.pack(side=tk.LEFT, padx=(0, 10))
 
     ttk.Button(input_frame, text="验证Cookie", command=get_and_validate_cookies).pack(side=tk.LEFT, padx=3)
     ttk.Button(input_frame, text="搜索全部", command=lambda: fetch_data(entry_keyword.get().strip())).pack(side=tk.LEFT, padx=3)
@@ -1811,6 +1890,9 @@ def main():
     # 持久化引用供其他函数使用
     global _stats_label
     _stats_label = stats_label
+    # 持久化控件引用
+    global entry_pages
+    entry_pages = entry_pages_widget
 
     # 启动主循环
     root.mainloop()

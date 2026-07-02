@@ -1,4 +1,4 @@
-# 闲鱼转卖助手 2.0（鱼小铺版） | Xianyu Reseller Assistant
+# 闲鱼转卖助手 2.0 | Xianyu Reseller Assistant
 
 > 基于 PyInstaller 打包的 Python 桌面应用逆向工程 —— 从 `.exe` 反编译恢复完整源码并重新构建
 
@@ -14,6 +14,8 @@
 - **多格式导出**：支持 CSV / Excel 数据导出
 - **图片批量下载**：多线程下载商品图片
 - **配置持久化**：保存/加载 Cookie 和搜索配置
+- **页数可调搜索**：支持自定义搜索页数（默认 20 页），进度实时显示
+- **试用过期机制**：首次运行起 30 天试用期，过期前 5 天弹窗提醒
 
 ## 技术栈
 
@@ -58,24 +60,28 @@ venv\Scripts\activate
 source venv/bin/activate
 
 # 安装依赖
-pip install -r requirements.txt
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 运行程序
 python main.py
 ```
 
-### 重新打包为 EXE
+### 打包为 EXE
 
 ```bash
-# 安装 pyinstaller
+# 确保已激活虚拟环境
 pip install pyinstaller
 
-# 执行编译脚本
-# Windows:
-build.bat
-# Linux/Mac:
-bash build.sh
+# 编译单文件 EXE（无控制台窗口）
+pyinstaller --onefile --windowed --name "闲鱼转卖助手" \
+  --collect-all imageio \
+  --hidden-import requests --hidden-import urllib3 \
+  --hidden-import imageio --hidden-import PIL \
+  --hidden-import asyncio --hidden-import concurrent.futures \
+  main.py
 ```
+
+> 输出文件在 `dist/闲鱼转卖助手.exe`，可直接分发给 Windows 用户运行。
 
 ## 使用说明
 
@@ -84,23 +90,25 @@ bash build.sh
    - **闲鱼 Cookie**（从浏览器 F12 开发者工具获取）
    - **阿奇索 Cookie**
    - **阿奇索 Authorization**
-3. 验证通过后，输入关键词点击 **「抓取数据」**
-4. 选择商品后可进行：
+3. 在关键词输入框输入搜索词，**页数**框设置抓取页数（默认 20）
+4. 点击 **「搜索全部」** 开始抓取，进度条实时显示
+5. 选择商品后可进行：
    - **打开链接** → 查看原商品详情
    - **下载图片** → 批量下载商品图
    - **导出 CSV/Excel** → 导出抓取的数据
+   - **一键转卖（选中项）** → 批量上架到阿奇索
 
 ## 项目结构
 
 ```
-├── main.py                 # 主程序源码（已恢复）
+├── main.py                 # 主程序源码
 ├── requirements.txt        # Python 依赖清单
 ├── build_config.ini        # PyInstaller 编译配置
 ├── build.bat               # Windows 编译脚本
 ├── build.sh                # Linux/Mac 编译脚本
-├── assets/                 # 资源文件
-├── config/                 # 配置文件目录
 ├── fetch_data_recovery.py  # 核心抓取函数独立恢复文件
+├── publish_functions.py    # 发布 / 转卖函数
+├── test_*.py               # API 测试脚本
 └── README.md               # 本文件
 ```
 
@@ -115,6 +123,8 @@ bash build.sh
 | `build_payload()` | 构建 API 请求参数 |
 | `download_images()` | 多线程图片下载 |
 | `export_to_csv/excel()` | 数据导出 |
+| `batch_resell_selected()` | 批量转卖上架 |
+| `check_license()` | 试用期 30 天过期检查 |
 
 ## 常见问题
 
@@ -129,6 +139,9 @@ bash build.sh
 2. F12 打开开发者工具 → Network（网络）
 3. 刷新页面，任选一个请求 → Headers → Cookie 字段
 4. 复制完整 Cookie 字符串粘贴到程序中
+
+### Q: 打包 EXE 运行时提示 "No package metadata found for imageio"？
+**A**: 这是 PyInstaller 没有打包 imageio 元数据导致的。编译时加上 `--collect-all imageio` 参数即可解决。
 
 ## 许可证
 

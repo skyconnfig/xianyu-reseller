@@ -43,6 +43,10 @@ temp_img/
 # Config with sensitive data
 config.json
 
+# API dump files
+*publish_*_dump.json
+*_dump.json
+
 # Disassembly/analysis files (too large for repo)
 disassembly_full.txt
 fetch_data_disassembly.txt
